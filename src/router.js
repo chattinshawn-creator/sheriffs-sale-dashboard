@@ -14,13 +14,41 @@ export function currentPath() {
   return window.location.hash.slice(1) || '/'
 }
 
+/**
+ * Match the current path against registered routes.
+ * Exact matches win first. Otherwise, routes containing `:param` segments
+ * are matched positionally — e.g. registering "/property/:caseNumber"
+ * matches "/property/GD-16-022895" with params = { caseNumber: "GD-16-022895" }.
+ */
+function matchRoute(path) {
+  if (routes.has(path)) return { render: routes.get(path), params: {} }
+  for (const [routePath, render] of routes) {
+    if (!routePath.includes(':')) continue
+    const routeParts = routePath.split('/')
+    const pathParts = path.split('/')
+    if (routeParts.length !== pathParts.length) continue
+    const params = {}
+    let ok = true
+    for (let i = 0; i < routeParts.length; i++) {
+      if (routeParts[i].startsWith(':')) {
+        params[routeParts[i].slice(1)] = decodeURIComponent(pathParts[i])
+      } else if (routeParts[i] !== pathParts[i]) {
+        ok = false
+        break
+      }
+    }
+    if (ok) return { render, params }
+  }
+  return null
+}
+
 export function startRouter(mountEl) {
   async function renderCurrent() {
     const path = currentPath()
-    const render = routes.get(path) || routes.get('/')
+    const match = matchRoute(path) || { render: routes.get('/'), params: {} }
     mountEl.innerHTML = ''
     try {
-      if (render) await render(mountEl)
+      if (match.render) await match.render(mountEl, match.params)
     } catch (e) {
       // Surface render errors instead of leaving a blank page.
       console.error('[router] error rendering', path, e)

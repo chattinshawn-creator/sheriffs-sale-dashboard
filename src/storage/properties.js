@@ -162,3 +162,22 @@ export async function countProperties() {
 export async function getProperty(caseNumber) {
   return get(caseNumber, stores.properties)
 }
+
+/**
+ * Merge user-supplied fields into an existing property record. Only the
+ * keys passed in `partial` are touched; everything else stays as-is.
+ *
+ * Allowed keys: arvOverride, maxBid, flag, notes.
+ * No-op if the property doesn't exist (the user wouldn't have a page open
+ * for a property that hasn't been parsed).
+ */
+export async function updateUserFields(caseNumber, partial) {
+  const existing = await get(caseNumber, stores.properties)
+  if (!existing) return null
+  const merged = {
+    ...existing,
+    userFields: { ...existing.userFields, ...partial },
+  }
+  await set(caseNumber, merged, stores.properties)
+  return merged
+}

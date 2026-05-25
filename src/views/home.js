@@ -136,7 +136,7 @@ function renderPropertyCard(prop, h) {
   }
 
   return `
-    <div class="card">
+    <a class="card prop-card" href="#/property/${encodeURIComponent(prop.caseNumber)}">
       <div class="row" style="justify-content:space-between;">
         <div>
           <strong>${escapeHtml(prop.address || '(no address)')}</strong>
@@ -152,7 +152,7 @@ function renderPropertyCard(prop, h) {
       <div class="meta">
         Status: ${escapeHtml(h.status || '?')}
       </div>
-    </div>
+    </a>
   `
 }
 

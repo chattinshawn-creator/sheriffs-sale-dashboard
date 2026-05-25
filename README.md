@@ -20,6 +20,11 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
   - Comments block parsed for postponement history, bankruptcy filings, replenishment-unpaid flag, stayed notes, sold notes
   - Failed chunks listed with a "Retry failed pages" button — successful chunks don't get re-spent
 - Home view groups uploads and parsed properties by sale month, sorted by status (Sold → Active → Postponed → Stayed) then opening bid
+- Click any property card on Home to open a per-property page with:
+  - Full sale info (plaintiff, attorney, defendant, sale type, etc.)
+  - Inline edit form for your max bid, ARV override, interested/skip flag, and notes — auto-saves on blur
+  - History table showing every sale month this case has appeared in, with a "View source PDF" link per row
+  - Structured Comments breakdown (postponement chain, bankruptcy history, replenishment flag, stayed/sold notes) plus the verbatim raw comments block
 
 ## How to run it locally
 
@@ -95,7 +100,12 @@ a history[] of per-month statuses/bids/outcomes
   ↓
 Home view shows uploads + properties grouped by sale month
   ↓
-(Future) Enrichment lookups, ranked list filters, per-property page, exports
+Click a property → per-property page with full details, history table,
+                   structured Comments breakdown, and an inline edit form
+                   for your max bid / ARV / flag / notes (auto-saves on blur)
+  ↓
+(Future) Enrichment lookups (assessor, liens, code violations), ranked list
+         filters, exports
 ```
 
 ## Parsing
@@ -145,7 +155,7 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   ├── main.js                   ← app entry point
 │   ├── router.js                 ← tiny hash-based router with error display
 │   ├── styles.css
-│   ├── views/                    ← one file per page (home, upload, settings)
+│   ├── views/                    ← one file per page (home, upload, settings, property)
 │   ├── storage/                  ← IndexedDB stores + per-store helpers
 │   ├── pdf/
 │   │   ├── parse.js              ← orchestrator: chunk → call → upsert → progress

@@ -3,6 +3,7 @@ import { renderNav } from './ui/nav.js'
 import { renderHome } from './views/home.js'
 import { renderUpload } from './views/upload.js'
 import { renderSettings } from './views/settings.js'
+import { renderProperty } from './views/property.js'
 
 const app = document.getElementById('app')
 
@@ -16,6 +17,7 @@ renderNav(navEl)
 registerRoute('/', renderHome)
 registerRoute('/upload', renderUpload)
 registerRoute('/settings', renderSettings)
+registerRoute('/property/:caseNumber', renderProperty)
 
 if (!window.location.hash) navigate('/')
 startRouter(mainEl)
