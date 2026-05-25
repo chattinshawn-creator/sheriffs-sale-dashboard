@@ -1,6 +1,7 @@
 import { saveUpload, findDuplicate, countUploads } from '../storage/uploads.js'
-import { noteLastUpload } from '../storage/settings.js'
-import { parsePdf } from '../pdf/parse.js'
+import { noteLastUpload, getApiKey } from '../storage/settings.js'
+import { parsePdf, estimateCost } from '../pdf/parse.js'
+import { DEFAULT_CHUNK_PAGES } from '../pdf/chunking.js'
 import { formatBytes, formatMonth, guessFromFilename, escapeHtml } from '../ui/format.js'
 
 export async function renderUpload(el) {
@@ -159,30 +160,172 @@ function renderSavedCard(stagingEl, { upload, total }) {
         Sale: ${formatMonth(upload.saleMonth)}
       </div>
       <div class="spacer"></div>
-      <div class="row">
-        <button class="primary" id="parse-btn">Parse PDF</button>
-        <a href="#/" class="muted small">Back to Home</a>
-      </div>
-      <div id="parse-status"></div>
+      <div id="parse-zone"></div>
     </div>
   `
+  renderParseInitial(stagingEl.querySelector('#parse-zone'), upload)
+}
 
-  stagingEl.querySelector('#parse-btn').addEventListener('click', async () => {
-    const res = await parsePdf(upload.id)
-    stagingEl.querySelector('#parse-status').innerHTML =
-      `<div class="spacer"></div><div class="banner warn">${escapeHtml(res.message)}</div>`
+// ---- Parse flow ----------------------------------------------------------
+
+function renderParseInitial(zone, upload) {
+  zone.innerHTML = `
+    <div class="row">
+      <button class="primary" id="parse-btn">Parse PDF</button>
+      <a href="#/" class="muted small">Back to Home</a>
+    </div>
+  `
+  zone.querySelector('#parse-btn').addEventListener('click', async () => {
+    const apiKey = await getApiKey()
+    if (!apiKey) {
+      zone.innerHTML = `
+        <div class="banner err">
+          No Anthropic API key saved. <a href="#/settings">Add one in Settings</a> first.
+        </div>
+        <div class="row">
+          <button id="back-after-no-key">Back</button>
+        </div>
+      `
+      zone.querySelector('#back-after-no-key').addEventListener('click', () => renderParseInitial(zone, upload))
+      return
+    }
+    renderParseEstimate(zone, upload)
   })
 }
 
+function renderParseEstimate(zone, upload) {
+  const chunkSize = DEFAULT_CHUNK_PAGES
+  const chunks = Math.ceil(upload.pageCount / chunkSize)
+  const estimate = estimateCost({ pageCount: upload.pageCount, chunkSize })
+
+  zone.innerHTML = `
+    <div class="banner info">
+      This PDF has <strong>${upload.pageCount} pages</strong> →
+      <strong>${chunks} chunks</strong> → estimated cost
+      <strong>~$${estimate.toFixed(2)}</strong>.
+      <div class="small" style="opacity:0.8;margin-top:4px;">
+        Estimate uses ~$0.02/page Sonnet pricing. Actual cost is shown after parsing.
+        The first chunk pays full price; later chunks reuse the cached system prompt at ~10%.
+      </div>
+    </div>
+    <div class="row">
+      <button class="primary" id="confirm-parse-btn">Parse PDF (~$${estimate.toFixed(2)})</button>
+      <button id="cancel-parse-btn">Cancel</button>
+    </div>
+  `
+  zone.querySelector('#cancel-parse-btn').addEventListener('click', () => renderParseInitial(zone, upload))
+  zone.querySelector('#confirm-parse-btn').addEventListener('click', () => {
+    runParse(zone, upload, {})
+  })
+}
+
+async function runParse(zone, upload, opts) {
+  zone.innerHTML = `
+    <div class="banner info">
+      <div id="parse-status-text">Preparing PDF…</div>
+      <div class="spacer"></div>
+      <div class="progress"><div id="parse-progress-bar" style="width:0%"></div></div>
+      <div class="small muted" style="margin-top:8px;">
+        Stay on this page — navigating away cancels progress reporting (the parse continues but you lose the live status).
+      </div>
+    </div>
+  `
+  const statusEl = zone.querySelector('#parse-status-text')
+  const barEl = zone.querySelector('#parse-progress-bar')
+
+  const onProgress = (info) => {
+    if (info.phase === 'chunking') {
+      statusEl.textContent = 'Splitting PDF into chunks…'
+      barEl.style.width = '3%'
+    } else if (info.phase === 'parsing') {
+      const denom = Math.max(info.totalChunks, 1)
+      const pct = Math.max(5, Math.round((info.chunkIdx / denom) * 100))
+      barEl.style.width = `${pct}%`
+      const errSuffix = info.lastError ? ` • last error on previous chunk: ${info.lastError.slice(0, 80)}…` : ''
+      statusEl.textContent =
+        `Parsing chunk ${info.chunkIdx + 1} of ${info.totalChunks} ` +
+        `(pages ${info.pageStart}–${info.pageEnd}) • ` +
+        `${info.savedSoFar} properties saved • ` +
+        `$${info.costSoFar.toFixed(2)} spent${errSuffix}`
+    } else if (info.phase === 'done') {
+      barEl.style.width = '100%'
+      statusEl.textContent = 'Done.'
+    }
+  }
+
+  try {
+    const result = await parsePdf(upload.id, { ...opts, onProgress })
+    renderParseResult(zone, upload, result)
+  } catch (e) {
+    zone.innerHTML = `
+      <div class="banner err">
+        <strong>Parsing failed before any chunks ran.</strong>
+        <pre style="white-space:pre-wrap;font-size:12px;margin-top:8px;">${escapeHtml(String(e?.message || e))}</pre>
+      </div>
+      <div class="row">
+        <button id="back-after-error">Back</button>
+      </div>
+    `
+    zone.querySelector('#back-after-error').addEventListener('click', () => renderParseInitial(zone, upload))
+  }
+}
+
+function renderParseResult(zone, upload, result) {
+  const failedCount = result.failedChunks.length
+  const u = result.usage
+  const totalInput = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)
+  const cacheHitPct = totalInput > 0
+    ? Math.round(100 * (u.cache_read_input_tokens || 0) / totalInput)
+    : 0
+
+  let failedHtml = ''
+  if (failedCount > 0) {
+    const pages = result.failedChunks.map(c => `${c.pageStart}–${c.pageEnd}`).join(', ')
+    failedHtml = `
+      <div class="banner warn">
+        <strong>${failedCount} chunk${failedCount === 1 ? '' : 's'} failed:</strong> pages ${escapeHtml(pages)}.
+        <div class="small" style="margin-top:4px;">First error: ${escapeHtml(result.failedChunks[0].error.slice(0, 240))}</div>
+        <div class="spacer"></div>
+        <button id="retry-btn">Retry failed pages</button>
+      </div>
+    `
+  }
+
+  zone.innerHTML = `
+    <div class="banner ${failedCount === 0 ? 'ok' : 'info'}">
+      <strong>Saved ${result.savedCount} propert${result.savedCount === 1 ? 'y' : 'ies'}</strong>
+      from ${upload.pageCount} pages.
+      <div class="small" style="margin-top:4px;opacity:0.8;">
+        Cost: <strong>$${result.totalCost.toFixed(3)}</strong> •
+        ${(u.input_tokens || 0).toLocaleString()} new input +
+        ${(u.cache_read_input_tokens || 0).toLocaleString()} cached input +
+        ${(u.output_tokens || 0).toLocaleString()} output tokens •
+        ${cacheHitPct}% cache hit
+      </div>
+    </div>
+    ${failedHtml}
+    <div class="row">
+      <button class="primary" id="go-home-btn">View on Home</button>
+      <button id="parse-again-btn">Parse again</button>
+    </div>
+  `
+
+  zone.querySelector('#go-home-btn').addEventListener('click', () => {
+    window.location.hash = '#/'
+  })
+  zone.querySelector('#parse-again-btn').addEventListener('click', () => renderParseInitial(zone, upload))
+  if (failedCount > 0) {
+    zone.querySelector('#retry-btn').addEventListener('click', () => {
+      runParse(zone, upload, { onlyChunks: result.failedChunks.map(c => c.idx) })
+    })
+  }
+}
+
 /**
- * Best-effort page count without pulling in a full PDF library.
- * Strategy: read the bytes as latin-1 text and count `/Type /Page` markers
- * (excluding the container `/Type /Pages` object). This works reliably for
- * PDFs produced by CountySuite (the Sheriff's Office software).
- *
- * Performance: a 5MB PDF takes well under a second to read and scan in a
- * modern browser. Big enough to be worth showing a "Reading…" banner; small
- * enough that we don't need a progress bar.
+ * Best-effort page count without a full PDF library. Counts `/Type /Page`
+ * markers (excluding the container `/Type /Pages` object). Reliable for
+ * PDFs produced by CountySuite (the Sheriff's software). Falls back to the
+ * largest `/Count` value if the primary scan finds nothing.
  */
 async function getPageCount(file) {
   try {
@@ -190,7 +333,6 @@ async function getPageCount(file) {
     const text = new TextDecoder('latin1').decode(buf)
     const matches = text.match(/\/Type\s*\/Page[^s]/g)
     if (matches && matches.length > 0) return matches.length
-    // Fallback: largest /Count value (usually on the root Pages object).
     const counts = [...text.matchAll(/\/Count\s+(\d+)/g)].map(m => parseInt(m[1], 10))
     if (counts.length) return Math.max(...counts)
     return 0

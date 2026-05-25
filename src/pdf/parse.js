@@ -1,21 +1,128 @@
+import { getUpload, getUploadBlob } from '../storage/uploads.js'
+import { stores, set } from '../storage/db.js'
+import { upsertProperty } from '../storage/properties.js'
+import { splitPdfIntoChunks, DEFAULT_CHUNK_PAGES } from './chunking.js'
+import { extractFromChunk, estimateCost } from './claude.js'
+
 /**
- * STUB — the real PDF parser lands in the NEXT prompt.
+ * Parse a previously-uploaded PDF: chunk it, send each chunk to Claude,
+ * upsert each property into IndexedDB. Reports progress via callback.
  *
- * Future behavior:
- *   1. Read the raw PDF Blob from the `pdf-blobs` store via getUploadBlob(uploadId).
- *   2. Extract text (likely pdf.js or a hand-rolled byte parser, no paid services).
- *   3. Send extracted text to the Anthropic API (using the stored key) to
- *      structure each property entry.
- *   4. For each parsed property, upsert into the `properties` store keyed by
- *      caseNumber — appending to `history[]` rather than overwriting, so
- *      cross-month duplicates collapse into one canonical record.
- *   5. Mark the upload as `parsed: true` and update its `properties` list.
+ * @param {string} uploadId
+ * @param {{
+ *   onProgress?: (info: {
+ *     phase: 'chunking' | 'parsing' | 'done',
+ *     chunkIdx: number, totalChunks: number,
+ *     pageStart: number, pageEnd: number,
+ *     savedSoFar: number, costSoFar: number,
+ *     lastError?: string,
+ *   }) => void,
+ *   onlyChunks?: number[],   // chunk indices to run (default: all). Used for retry.
+ * }} [options]
+ * @returns {Promise<{
+ *   savedCount: number,
+ *   totalCost: number,
+ *   failedChunks: Array<{ idx: number, pageStart: number, pageEnd: number, error: string }>,
+ *   totalChunks: number,
+ *   usage: object,
+ * }>}
  */
-export async function parsePdf(uploadId) {
-  console.log('[parsePdf] called for upload', uploadId)
+export async function parsePdf(uploadId, options = {}) {
+  const { onProgress = () => {}, onlyChunks = null } = options
+
+  const upload = await getUpload(uploadId)
+  if (!upload) throw new Error(`Upload not found: ${uploadId}`)
+  const blob = await getUploadBlob(uploadId)
+  if (!blob) throw new Error(`PDF blob missing for upload ${uploadId}`)
+
+  onProgress({
+    phase: 'chunking', chunkIdx: 0, totalChunks: 0,
+    pageStart: 0, pageEnd: 0, savedSoFar: 0, costSoFar: 0,
+  })
+
+  const chunks = await splitPdfIntoChunks(blob, DEFAULT_CHUNK_PAGES)
+  const totalChunks = chunks.length
+
+  const failedChunks = []
+  const aggregateUsage = {
+    input_tokens: 0, output_tokens: 0,
+    cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+  }
+  let savedCount = 0
+  let costSoFar = 0
+
+  const chunkIndicesToRun = onlyChunks ?? chunks.map((_, i) => i)
+
+  for (const idx of chunkIndicesToRun) {
+    const chunk = chunks[idx]
+    onProgress({
+      phase: 'parsing', chunkIdx: idx, totalChunks,
+      pageStart: chunk.pageStart, pageEnd: chunk.pageEnd,
+      savedSoFar: savedCount, costSoFar,
+    })
+
+    try {
+      const { properties, usage, cost } = await extractFromChunk(chunk.blob)
+
+      for (const parsed of properties) {
+        if (!parsed.caseNumber) continue  // chunk-boundary cut-off, per prompt rule
+        await upsertProperty(parsed, {
+          uploadId,
+          saleMonth: upload.saleMonth,
+        })
+        savedCount++
+      }
+
+      costSoFar += cost
+      aggregateUsage.input_tokens               += usage.input_tokens               || 0
+      aggregateUsage.output_tokens              += usage.output_tokens              || 0
+      aggregateUsage.cache_read_input_tokens    += usage.cache_read_input_tokens    || 0
+      aggregateUsage.cache_creation_input_tokens += usage.cache_creation_input_tokens || 0
+    } catch (e) {
+      console.error(`[parsePdf] chunk ${idx} (pages ${chunk.pageStart}-${chunk.pageEnd}) failed:`, e)
+      failedChunks.push({
+        idx,
+        pageStart: chunk.pageStart,
+        pageEnd: chunk.pageEnd,
+        error: String(e?.message || e),
+      })
+      onProgress({
+        phase: 'parsing', chunkIdx: idx, totalChunks,
+        pageStart: chunk.pageStart, pageEnd: chunk.pageEnd,
+        savedSoFar: savedCount, costSoFar,
+        lastError: String(e?.message || e),
+      })
+    }
+  }
+
+  // Mark the upload as parsed (or partially parsed) so the UI can reflect it.
+  const updated = {
+    ...upload,
+    parsed: failedChunks.length === 0,
+    lastParsedAt: Date.now(),
+    lastParseStats: {
+      savedCount,
+      totalCost: costSoFar,
+      failedChunkCount: failedChunks.length,
+      usage: aggregateUsage,
+    },
+  }
+  await set(uploadId, updated, stores.uploads)
+
+  onProgress({
+    phase: 'done', chunkIdx: totalChunks, totalChunks,
+    pageStart: 0, pageEnd: 0,
+    savedSoFar: savedCount, costSoFar,
+  })
+
   return {
-    ok: false,
-    todo: true,
-    message: 'PDF parsing is not yet implemented — this is a stub for the next prompt.',
+    savedCount,
+    totalCost: costSoFar,
+    failedChunks,
+    totalChunks,
+    usage: aggregateUsage,
   }
 }
+
+// Re-export for convenience so the upload view can show pre-parse estimates.
+export { estimateCost }
