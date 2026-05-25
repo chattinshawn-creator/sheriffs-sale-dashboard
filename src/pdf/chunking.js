@@ -1,11 +1,14 @@
 import { PDFDocument } from 'pdf-lib'
 
 /**
- * Default chunk size in pages. 8 keeps each chunk's output well under
- * Sonnet's max_tokens, and gives ~11 chunks for a typical 85-page PDF —
- * good progress visibility without too many API round trips.
+ * Default chunk size in pages. 5 keeps each chunk's output well under
+ * Sonnet's max_tokens even on comment-heavy entries (a 6-page chunk has
+ * been observed to exceed 8K output tokens). Gives ~17 chunks for a typical
+ * 85-page PDF — slightly more API calls, but much safer against truncation.
+ *
+ * If you raise this back up, also raise max_tokens in src/pdf/claude.js.
  */
-export const DEFAULT_CHUNK_PAGES = 8
+export const DEFAULT_CHUNK_PAGES = 5
 
 /**
  * Split a PDF Blob into N-page chunks. Each chunk is a fresh PDF Blob

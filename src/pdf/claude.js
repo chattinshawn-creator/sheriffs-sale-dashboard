@@ -1,5 +1,5 @@
 import { getApiKey } from '../storage/settings.js'
-import { SYSTEM_PROMPT, USER_PROMPT } from './prompts.js'
+import { SYSTEM_PROMPT, USER_PROMPT, REPAIR_SYSTEM_PROMPT, REPAIR_USER_PROMPT } from './prompts.js'
 
 // IMPORTANT: update this when a newer Sonnet model is released. The API
 // returns a clear 404 error if the model name doesn't exist, so a bad value
@@ -36,7 +36,13 @@ export async function extractFromChunk(pdfChunk) {
 
   const body = {
     model: MODEL,
-    max_tokens: 8192,
+    // 16384 fits comment-heavy chunks of ~15 properties without truncation.
+    // Sonnet 4+ supports much higher if needed; bump further if you ever see
+    // "stop_reason: max_tokens" errors on larger chunks.
+    max_tokens: 16384,
+    // Lowest temperature for structured extraction — we want the same
+    // parser output every time, not creativity.
+    temperature: 0,
     system: [
       {
         type: 'text',
@@ -90,12 +96,107 @@ export async function extractFromChunk(pdfChunk) {
     throw new Error('No text block in API response: ' + JSON.stringify(data))
   }
 
+  // Detect output-token truncation BEFORE trying to parse, so the user sees
+  // a useful error instead of "non-JSON output."
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error(
+      `Response truncated: hit max_tokens limit of ${body.max_tokens}. ` +
+      `Try reducing the chunk size in src/pdf/chunking.js (DEFAULT_CHUNK_PAGES), ` +
+      `or raising max_tokens in src/pdf/claude.js.`
+    )
+  }
+
   const properties = parseJsonResponse(textBlock.text)
 
   const usage = data.usage || {}
   const cost = computeCost(usage)
 
   return { properties, usage, cost }
+}
+
+/**
+ * Repair pass: re-extract records that failed validation, using the SAME PDF
+ * chunk plus the list of bad records and their detected issues.
+ *
+ * @param {Blob} pdfChunk - the original chunk PDF
+ * @param {Array<{caseNumber: string|null, address: string|null, issues: string[]}>} flaggedRecords
+ * @returns {Promise<{repairs: Array, usage: object, cost: number}>}
+ *   `repairs[i] = { originalCaseNumber, matchedByAddress, record }`
+ */
+export async function repairChunk(pdfChunk, flaggedRecords) {
+  const apiKey = await getApiKey()
+  if (!apiKey) throw new Error('No Anthropic API key saved.')
+
+  const base64Pdf = await blobToBase64(pdfChunk)
+
+  const body = {
+    model: MODEL,
+    max_tokens: 16384,
+    temperature: 0,
+    system: [{ type: 'text', text: REPAIR_SYSTEM_PROMPT }],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: base64Pdf },
+          },
+          { type: 'text', text: REPAIR_USER_PROMPT(flaggedRecords) },
+        ],
+      },
+    ],
+  }
+
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': ANTHROPIC_VERSION,
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Anthropic API ${res.status}: ${text}`)
+  }
+
+  const data = await res.json()
+  const textBlock = data.content?.find(b => b.type === 'text')
+  if (!textBlock) throw new Error('No text block in repair response')
+
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error(
+      `Repair response truncated: hit max_tokens limit of ${body.max_tokens}. ` +
+      `Reduce chunk size or raise max_tokens.`
+    )
+  }
+
+  const repairs = parseRepairResponse(textBlock.text)
+  const usage = data.usage || {}
+  const cost = computeCost(usage)
+
+  return { repairs, usage, cost }
+}
+
+function parseRepairResponse(text) {
+  let cleaned = text.trim()
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/, '').replace(/```\s*$/, '')
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(cleaned)
+  } catch (e) {
+    throw new Error('Repair returned non-JSON output:\n' + text.slice(0, 500))
+  }
+  if (!parsed || !Array.isArray(parsed.repairs)) {
+    throw new Error('Repair output missing `repairs` array')
+  }
+  return parsed.repairs
 }
 
 /**

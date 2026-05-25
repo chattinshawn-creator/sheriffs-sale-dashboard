@@ -27,7 +27,7 @@ export async function getAssessor(rawParcelId, opts = {}) {
   }
 
   if (!opts.force) {
-    const cached = await get(parid, stores.geoDataCache)
+    const cached = await get('assessor:' + parid, stores.geoDataCache)
     if (cached && (Date.now() - (cached.fetchedAt || 0)) < TTL_MS) {
       return {
         status: cached.data ? 'ok' : 'not-found',
@@ -51,7 +51,7 @@ export async function getAssessor(rawParcelId, opts = {}) {
   }
 
   const fetchedAt = Date.now()
-  await set(parid, { data: record, fetchedAt }, stores.geoDataCache)
+  await set('assessor:' + parid, { data: record, fetchedAt }, stores.geoDataCache)
 
   return {
     status: record ? 'ok' : 'not-found',

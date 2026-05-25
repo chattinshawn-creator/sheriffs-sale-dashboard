@@ -245,8 +245,13 @@ async function runParse(zone, upload, opts) {
       statusEl.textContent =
         `Parsing chunk ${info.chunkIdx + 1} of ${info.totalChunks} ` +
         `(pages ${info.pageStart}–${info.pageEnd}) • ` +
-        `${info.savedSoFar} properties saved • ` +
+        `${info.savedSoFar} saved • ${info.repairedSoFar || 0} repaired • ` +
         `$${info.costSoFar.toFixed(2)} spent${errSuffix}`
+    } else if (info.phase === 'repairing') {
+      statusEl.textContent =
+        `Repairing flagged records in chunk ${info.chunkIdx + 1} of ${info.totalChunks} ` +
+        `(pages ${info.pageStart}–${info.pageEnd}) • ` +
+        `$${info.costSoFar.toFixed(2)} spent so far…`
     } else if (info.phase === 'done') {
       barEl.style.width = '100%'
       statusEl.textContent = 'Done.'
@@ -291,10 +296,16 @@ function renderParseResult(zone, upload, result) {
     `
   }
 
+  const repaired = result.repairedCount || 0
+  const flagged = result.flaggedCount || 0
+  const qualityLine =
+    `${result.savedCount} saved` +
+    (repaired > 0 ? ` • ${repaired} repaired` : '') +
+    (flagged > 0 ? ` • <strong style="color:var(--color-warn)">${flagged} still flagged</strong>` : '')
+
   zone.innerHTML = `
-    <div class="banner ${failedCount === 0 ? 'ok' : 'info'}">
-      <strong>Saved ${result.savedCount} propert${result.savedCount === 1 ? 'y' : 'ies'}</strong>
-      from ${upload.pageCount} pages.
+    <div class="banner ${failedCount === 0 && flagged === 0 ? 'ok' : 'info'}">
+      <strong>Parse complete.</strong> ${qualityLine} from ${upload.pageCount} pages.
       <div class="small" style="margin-top:4px;opacity:0.8;">
         Cost: <strong>$${result.totalCost.toFixed(3)}</strong> •
         ${(u.input_tokens || 0).toLocaleString()} new input +
@@ -302,6 +313,11 @@ function renderParseResult(zone, upload, result) {
         ${(u.output_tokens || 0).toLocaleString()} output tokens •
         ${cacheHitPct}% cache hit
       </div>
+      ${flagged > 0 ? `
+        <div class="small" style="margin-top:6px;">
+          Flagged records have a "needs review" badge on Home — open them to see what went wrong.
+        </div>
+      ` : ''}
     </div>
     ${failedHtml}
     <div class="row">

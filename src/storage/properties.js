@@ -75,6 +75,8 @@ const PARSER_FIELDS = [
   'saleNumber', 'parcelId', 'address', 'municipality', 'tracts', 'addresses',
   'plaintiff', 'plaintiffAttorney', 'defendant', 'saleType', 'openingBid',
   'serviceFlags', 'commentsRaw', 'commentsParsed',
+  // Validation result — stamped by the parser, surfaced as a badge in the UI.
+  '_validation',
 ]
 
 /**

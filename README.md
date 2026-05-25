@@ -25,6 +25,7 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
   - Inline edit form for your max bid, ARV override, interested/skip flag, and notes — auto-saves on blur
   - **Property Assessment** card pulled live from WPRDC (Western Pennsylvania Regional Data Center): assessed value, fair market value, year built, sq ft, BR/BA, condition, lot area, last sale price + date, owner of record
   - **Spread analysis**: ARV (your override or WPRDC fair market) minus opening bid; margin if you win at your max bid. Green for positive, red for negative.
+  - **Pittsburgh data** card (Pittsburgh-proper properties only): PLI code violations (open/closed counts + per-record list since June 2020) and PLI permits (per-record list since June 2019). For properties outside Pittsburgh, the card greys out with a tooltip explaining the coverage gap.
   - History table showing every sale month this case has appeared in, with a "View source PDF" link per row
   - Structured Comments breakdown (postponement chain, bankruptcy history, replenishment flag, stayed/sold notes) plus the verbatim raw comments block
 
@@ -129,6 +130,20 @@ inline using the fetched assessor value.
 
 The Anthropic API is called directly from your browser — there's no backend to proxy through, because this is a static site. Anthropic supports this with a special header (`anthropic-dangerous-direct-browser-access: true`). The "dangerous" name reflects that your API key sits in IndexedDB on this device — anyone with browser access can read it. That's the same tradeoff documented on the Settings page; the parser doesn't introduce new exposure, it just uses the key you saved.
 
+### Validation + repair pass
+
+The PDF parser isn't perfect — Claude occasionally column-shifts (assigns values from one cell to the wrong field) or drops digits from numbers. To catch these, every parsed record runs through a local validator that checks:
+
+- `caseNumber` matches `GD-YY-NNNNNN`
+- `parcelId` matches `DDDD-L-DDDDD` (1-4 digits, 1 letter, 1-5 digits, optional sub-segment)
+- `openingBid` is present and ≥ $500 (lower values usually mean truncated digits)
+- `plaintiff` doesn't contain attorney-firm patterns like "LLC" / "LLP" / "ESQ" / "& MAIELLO" / "LEGAL TAX SERVICE" (those would indicate column-shift with the attorney field)
+- `plaintiffAttorney`, `defendant`, `address`, `municipality`, `saleType` are all present
+
+When any record fails validation, the orchestrator makes a follow-up **repair call** to Claude using the *same* PDF chunk, the list of flagged records, and explicit guidance about column-shift errors. The repair response replaces the bad record. If repair fails too (or only fixes some fields), the record stays in storage with a `needs review` badge on Home and a banner at the top of its property page.
+
+Cost: roughly +5-10% on top of the main parse, only billed for chunks that actually had flagged records.
+
 ## Enrichment
 
 When you open a per-property page, the app looks up the county assessor record for that parcel and adds it to the page.
@@ -139,6 +154,22 @@ When you open a per-property page, the app looks up the county assessor record f
 - **Parcel ID normalization:** Sheriff PDFs use formats like `556-G-276` or `0033-B-00272`; WPRDC uses a 16-char no-separator format like `0556G00276000000`. The app converts automatically. If the source format doesn't match the standard pattern, you'll see a clear "couldn't normalize" message with a link to look the property up manually.
 - **Caching:** results are cached in IndexedDB's `geo-data-cache` store for 30 days, keyed by normalized parcel ID. A **Refresh** link on the Property Assessment card bypasses the cache.
 - **Spread analysis:** ARV − opening bid, plus margin if won at max bid. ARV defaults to WPRDC fair market value but uses your `arvOverride` if you've set one on this property.
+
+### Pittsburgh-only data (PLI Violations + PLI Permits)
+
+For properties whose Municipality column from the Sheriff PDF is `Pittsburgh`, the per-property page also loads:
+
+- **PLI/DOMI/ES Violations** ([WPRDC dataset](https://data.wprdc.org/dataset/pittsburgh-pli-violations-report)) — open and closed violations, with case file type, status, investigation outcome, and date. Coverage starts **June 2020**; older violations live in a historical resource we don't currently query.
+- **PLI Permits** ([WPRDC dataset](https://data.wprdc.org/dataset/pli-permits)) — every permit issued (building, mechanical, electrical, general). Coverage starts **June 2019**.
+
+Both datasets are keyed on the same Allegheny County parcel ID, normalized the same way as the assessor lookup. Both share the 30-day cache TTL.
+
+For properties **outside Pittsburgh proper** (Penn Hills, Munhall, Liberty, etc.), the Pittsburgh data card greys out with an explanation. PLI is a City of Pittsburgh department; surrounding municipalities have their own code enforcement that isn't published through WPRDC. This is the "data unavailable" treatment we designed at the start.
+
+### What's NOT enriched (and why)
+
+- **Condemned/unfit property list** — not published as a clean dataset on WPRDC. The city tracks this internally but doesn't expose it for download.
+- **Municipal liens at parcel level** — WPRDC only publishes lien data aggregated at the census-tract level, not per-property. For a specific property's lien status you'd still need to check with the City Treasurer directly.
 
 ## Storage
 
@@ -178,14 +209,17 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   ├── views/                    ← one file per page (home, upload, settings, property)
 │   ├── storage/                  ← IndexedDB stores + per-store helpers
 │   ├── pdf/
-│   │   ├── parse.js              ← orchestrator: chunk → call → upsert → progress
+│   │   ├── parse.js              ← orchestrator: chunk → extract → validate → repair → upsert
 │   │   ├── chunking.js           ← splits a PDF into N-page chunks via pdf-lib
-│   │   ├── claude.js             ← Anthropic API wrapper (browser fetch)
-│   │   └── prompts.js            ← system prompt + property schema
+│   │   ├── claude.js             ← Anthropic API wrapper (extract + repair calls)
+│   │   ├── prompts.js            ← system prompts + property schema
+│   │   └── validation.js         ← format + heuristic checks on parsed records
 │   ├── enrichment/
 │   │   ├── normalize.js          ← Sheriff parcel ID → WPRDC PARID
-│   │   ├── wprdc.js              ← WPRDC CKAN API wrapper
-│   │   └── assessor.js           ← cache-aware assessor lookup (30-day TTL)
+│   │   ├── wprdc.js              ← WPRDC CKAN API wrapper + dataset IDs
+│   │   ├── assessor.js           ← cache-aware assessor lookup (30-day TTL)
+│   │   ├── violations.js         ← PLI/DOMI/ES violations (Pittsburgh only)
+│   │   └── permits.js            ← PLI permits (Pittsburgh only)
 │   └── ui/                       ← shared bits (nav, formatters)
 ├── index.html
 ├── package.json

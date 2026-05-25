@@ -1,6 +1,9 @@
 import { getProperty, updateUserFields } from '../storage/properties.js'
 import { getUpload, getUploadBlob } from '../storage/uploads.js'
 import { getAssessor } from '../enrichment/assessor.js'
+import { getViolations } from '../enrichment/violations.js'
+import { getPermits } from '../enrichment/permits.js'
+import { validateProperty } from '../pdf/validation.js'
 import { formatMonth, escapeHtml, escapeAttr } from '../ui/format.js'
 
 export async function renderProperty(el, params) {
@@ -34,6 +37,7 @@ export async function renderProperty(el, params) {
   wireUserFieldsAutoSave(el, prop)
   wireSourcePdfLinks(el)
   loadEnrichment(el, prop, current)
+  loadPittsburghData(el, prop)
 }
 
 // ─── Top-level shell ───────────────────────────────────────────────────────
@@ -60,9 +64,11 @@ function renderShell(prop, current, uploadsByHistory) {
       ${flags.join('')}
     </div>
 
+    ${renderValidationBanner(prop)}
     ${renderUserFieldsCard(prop)}
     ${renderSaleInfoCard(prop, current)}
     ${renderEnrichmentPlaceholder()}
+    ${renderPittsburghPlaceholder(prop)}
     ${prop.tracts > 1 ? renderMultiTractCard(prop) : ''}
     ${renderHistoryCard(prop, uploadsByHistory)}
     ${renderCommentsCard(prop)}
@@ -85,6 +91,24 @@ function collectFlags(prop, current) {
     out.push(`<span class="tag">${postponements} postponements</span>`)
   }
   return out
+}
+
+// ─── Validation banner ─────────────────────────────────────────────────────
+
+function renderValidationBanner(prop) {
+  // Re-validate at display time so existing records pick up rule updates
+  // without needing a full re-parse.
+  const v = validateProperty(prop)
+  if (v.ok) return ''
+  const items = v.issues.map(s => `<li>${escapeHtml(s)}</li>`).join('')
+  return `
+    <div class="banner warn">
+      <strong>This record didn't pass validation.</strong> One or more fields look wrong:
+      <ul style="margin:6px 0 0 0;padding-left:20px;font-size:13px;">${items}</ul>
+      <div class="spacer"></div>
+      <div class="small">Use the <em>View source PDF</em> link in the history table below to compare against the original, and re-parse the upload to retry.</div>
+    </div>
+  `
 }
 
 // ─── Your notes & bids (auto-save on blur) ─────────────────────────────────
@@ -560,4 +584,231 @@ function formatRelative(ts) {
   if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`
   const day = Math.floor(hr / 24)
   return `${day} day${day === 1 ? '' : 's'} ago`
+}
+
+// ─── Pittsburgh-only data (PLI Violations + Permits) ───────────────────────
+
+function renderPittsburghPlaceholder(prop) {
+  if (!prop.isPittsburghProper) {
+    // Greyed-out card with explanatory tooltip — pattern Shawn picked at start.
+    return `
+      <div class="card" id="pgh-zone" style="opacity:0.7;">
+        <h3 style="margin-top:0;">Pittsburgh data</h3>
+        <div class="banner info">
+          <strong>Not available for this property.</strong>
+          ${escapeHtml(prop.address || 'This property')} is in
+          <strong>${escapeHtml(prop.municipality || 'an unknown municipality')}</strong>,
+          not Pittsburgh proper. PLI code violations and building permits are only
+          published by the City of Pittsburgh through WPRDC.
+        </div>
+        <div style="opacity:0.5;">
+          ${kv('Open code violations', '<span class="muted">— (data not available)</span>')}
+          ${kv('Total PLI permits', '<span class="muted">— (data not available)</span>')}
+        </div>
+      </div>
+    `
+  }
+  return `
+    <div class="card" id="pgh-zone">
+      <h3 style="margin-top:0;">Pittsburgh data</h3>
+      <p class="muted small">Loading violations and permits from WPRDC…</p>
+    </div>
+  `
+}
+
+async function loadPittsburghData(el, prop, { force = false } = {}) {
+  if (!prop.isPittsburghProper) return  // greyed placeholder stays as-is
+
+  const zone = el.querySelector('#pgh-zone')
+  if (!zone) return
+
+  const [violationsResult, permitsResult] = await Promise.all([
+    getViolations(prop.parcelId, { force }),
+    getPermits(prop.parcelId, { force }),
+  ])
+
+  zone.outerHTML = renderPittsburghCard(prop, violationsResult, permitsResult)
+
+  // Rewire refresh links inside the freshly rendered card.
+  const newZone = el.querySelector('#pgh-zone')
+  const refreshBtn = newZone?.querySelector('#refresh-pgh')
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async (e) => {
+      e.preventDefault()
+      newZone.outerHTML = `
+        <div class="card" id="pgh-zone">
+          <h3 style="margin-top:0;">Pittsburgh data</h3>
+          <p class="muted small">Refreshing from WPRDC…</p>
+        </div>
+      `
+      loadPittsburghData(el, prop, { force: true })
+    })
+  }
+}
+
+function renderPittsburghCard(prop, vRes, pRes) {
+  const violations = vRes.status === 'ok' ? vRes.data : []
+  const permits = pRes.status === 'ok' ? pRes.data : []
+  const refreshLink = `<a href="#" id="refresh-pgh" class="small">Refresh</a>`
+
+  const anyError = vRes.status === 'error' || pRes.status === 'error'
+  const errorBanner = anyError ? `
+    <div class="banner err">
+      ${vRes.status === 'error' ? `Violations: ${escapeHtml(vRes.error)}<br>` : ''}
+      ${pRes.status === 'error' ? `Permits: ${escapeHtml(pRes.error)}` : ''}
+    </div>
+  ` : ''
+
+  const fetchedAt = vRes.fetchedAt || pRes.fetchedAt
+  const fromCache = vRes.fromCache && pRes.fromCache
+
+  return `
+    <div class="card" id="pgh-zone">
+      <h3 style="margin-top:0;">Pittsburgh data</h3>
+      ${errorBanner}
+      ${renderViolationsSection(violations)}
+      <div class="spacer"></div>
+      ${renderPermitsSection(permits)}
+      <div class="row" style="margin-top:12px;justify-content:space-between;">
+        <span class="muted small">
+          ${fetchedAt
+            ? (fromCache
+                ? `From cache, fetched ${formatRelative(fetchedAt)}.`
+                : `Just fetched from WPRDC.`)
+            : ''}
+        </span>
+        ${refreshLink}
+      </div>
+    </div>
+  `
+}
+
+function renderViolationsSection(violations) {
+  const total = violations.length
+  const open = violations.filter(v => /open|active|investigat/i.test(v.status || '')).length
+  const closed = violations.filter(v => /closed|complete|resolv/i.test(v.status || '')).length
+
+  let summary
+  if (total === 0) {
+    summary = `<p class="muted small" style="margin:4px 0;">No code violations on record since June 2020 (the dataset's start date — older violations not shown).</p>`
+  } else {
+    summary = `
+      <p style="margin:4px 0;">
+        <strong>${total}</strong> total
+        ${open > 0 ? ` • <strong style="color:var(--color-err)">${open} open</strong>` : ''}
+        ${closed > 0 ? ` • <span class="muted">${closed} closed</span>` : ''}
+      </p>
+    `
+  }
+
+  // Sort newest first, then split top 10 vs rest.
+  const sorted = [...violations].sort((a, b) =>
+    (b.investigation_date || '').localeCompare(a.investigation_date || ''))
+  const top = sorted.slice(0, 10)
+  const rest = sorted.slice(10)
+
+  const topHtml = top.length > 0 ? `
+    <ul style="padding-left:18px;margin:6px 0;font-size:14px;">
+      ${top.map(violationRow).join('')}
+    </ul>
+  ` : ''
+
+  const expandHtml = rest.length > 0 ? `
+    <details style="margin-top:6px;">
+      <summary class="small muted" style="cursor:pointer;">Show ${rest.length} more</summary>
+      <ul style="padding-left:18px;margin:6px 0;font-size:14px;">
+        ${rest.map(violationRow).join('')}
+      </ul>
+    </details>
+  ` : ''
+
+  return `
+    <h4 class="muted small" style="margin:0 0 4px 0;text-transform:uppercase;letter-spacing:0.04em;">
+      Code violations
+    </h4>
+    ${summary}
+    ${topHtml}
+    ${expandHtml}
+  `
+}
+
+function violationRow(v) {
+  const date = v.investigation_date || '—'
+  const type = v.case_file_type || 'Violation'
+  const status = v.status || '?'
+  const outcome = v.investigation_outcome ? ` (${v.investigation_outcome})` : ''
+  const statusColor = /open|active|investigat/i.test(status) ? 'var(--color-err)' : 'var(--color-muted)'
+  return `
+    <li style="margin-bottom:4px;">
+      <span class="muted">${escapeHtml(date)}</span> —
+      ${escapeHtml(type)}
+      <span style="color:${statusColor}">[${escapeHtml(status)}]</span>${escapeHtml(outcome)}
+    </li>
+  `
+}
+
+function renderPermitsSection(permits) {
+  const total = permits.length
+
+  let summary
+  if (total === 0) {
+    summary = `<p class="muted small" style="margin:4px 0;">No PLI permits on record since June 2019.</p>`
+  } else {
+    const mostRecent = permits
+      .map(p => p.issue_date)
+      .filter(Boolean)
+      .sort()
+      .pop()
+    summary = `
+      <p style="margin:4px 0;">
+        <strong>${total}</strong> total
+        ${mostRecent ? ` • most recent ${escapeHtml(mostRecent)}` : ''}
+      </p>
+    `
+  }
+
+  const sorted = [...permits].sort((a, b) =>
+    (b.issue_date || '').localeCompare(a.issue_date || ''))
+  const top = sorted.slice(0, 10)
+  const rest = sorted.slice(10)
+
+  const topHtml = top.length > 0 ? `
+    <ul style="padding-left:18px;margin:6px 0;font-size:14px;">
+      ${top.map(permitRow).join('')}
+    </ul>
+  ` : ''
+
+  const expandHtml = rest.length > 0 ? `
+    <details style="margin-top:6px;">
+      <summary class="small muted" style="cursor:pointer;">Show ${rest.length} more</summary>
+      <ul style="padding-left:18px;margin:6px 0;font-size:14px;">
+        ${rest.map(permitRow).join('')}
+      </ul>
+    </details>
+  ` : ''
+
+  return `
+    <h4 class="muted small" style="margin:0 0 4px 0;text-transform:uppercase;letter-spacing:0.04em;">
+      PLI permits
+    </h4>
+    ${summary}
+    ${topHtml}
+    ${expandHtml}
+  `
+}
+
+function permitRow(p) {
+  const date = p.issue_date || '—'
+  const type = [p.permit_type, p.work_type].filter(Boolean).join(': ')
+  const status = p.status || '?'
+  const value = p.total_project_value
+    ? ` ($${Number(p.total_project_value).toLocaleString()})`
+    : ''
+  return `
+    <li style="margin-bottom:4px;">
+      <span class="muted">${escapeHtml(date)}</span> —
+      ${escapeHtml(type || 'Permit')}
+      <span class="muted">[${escapeHtml(status)}]</span>${value}
+    </li>
+  `
 }

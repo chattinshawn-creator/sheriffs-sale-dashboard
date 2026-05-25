@@ -1,5 +1,6 @@
 import { listUploads } from '../storage/uploads.js'
 import { listProperties } from '../storage/properties.js'
+import { validateProperty } from '../pdf/validation.js'
 import { formatMonth, formatBytes, formatDate, escapeHtml } from '../ui/format.js'
 
 export async function renderHome(el) {
@@ -124,7 +125,13 @@ function renderPropertyCard(prop, h) {
   const sold = h.soldFor != null
     ? ` • <strong>Sold for $${h.soldFor.toLocaleString()}</strong> to ${escapeHtml(h.soldTo || '?')}`
     : ''
+  // Re-validate at display time so existing records pick up rule updates
+  // (e.g. new case-prefix support) without needing a full re-parse.
+  const liveValidation = validateProperty(prop)
   const flagsHtml = []
+  if (!liveValidation.ok) {
+    flagsHtml.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;" title="${escapeHtml(liveValidation.issues.join('; '))}">needs review</span>`)
+  }
   if (prop.commentsParsed?.replenishmentUnpaid) {
     flagsHtml.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;">replenishment unpaid</span>`)
   }
