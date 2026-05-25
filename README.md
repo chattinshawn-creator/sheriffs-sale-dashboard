@@ -23,6 +23,8 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
 - Click any property card on Home to open a per-property page with:
   - Full sale info (plaintiff, attorney, defendant, sale type, etc.)
   - Inline edit form for your max bid, ARV override, interested/skip flag, and notes — auto-saves on blur
+  - **Property Assessment** card pulled live from WPRDC (Western Pennsylvania Regional Data Center): assessed value, fair market value, year built, sq ft, BR/BA, condition, lot area, last sale price + date, owner of record
+  - **Spread analysis**: ARV (your override or WPRDC fair market) minus opening bid; margin if you win at your max bid. Green for positive, red for negative.
   - History table showing every sale month this case has appeared in, with a "View source PDF" link per row
   - Structured Comments breakdown (postponement chain, bankruptcy history, replenishment flag, stayed/sold notes) plus the verbatim raw comments block
 
@@ -104,8 +106,15 @@ Click a property → per-property page with full details, history table,
                    structured Comments breakdown, and an inline edit form
                    for your max bid / ARV / flag / notes (auto-saves on blur)
   ↓
-(Future) Enrichment lookups (assessor, liens, code violations), ranked list
-         filters, exports
+On page open, the property's parcel ID is normalized (e.g. "556-G-276"
+→ "0556G00276000000") and looked up in the WPRDC Allegheny County Property
+Assessments dataset. Result is cached in IndexedDB for 30 days.
+  ↓
+Spread analysis (ARV − opening bid, margin if won at max bid) renders
+inline using the fetched assessor value.
+  ↓
+(Future) Pittsburgh-only enrichment sources (code violations, liens,
+         condemnation, permits), ranked-list filters and search, exports
 ```
 
 ## Parsing
@@ -119,6 +128,17 @@ Click a property → per-property page with full details, history table,
 ### Browser-direct API calls
 
 The Anthropic API is called directly from your browser — there's no backend to proxy through, because this is a static site. Anthropic supports this with a special header (`anthropic-dangerous-direct-browser-access: true`). The "dangerous" name reflects that your API key sits in IndexedDB on this device — anyone with browser access can read it. That's the same tradeoff documented on the Settings page; the parser doesn't introduce new exposure, it just uses the key you saved.
+
+## Enrichment
+
+When you open a per-property page, the app looks up the county assessor record for that parcel and adds it to the page.
+
+- **Source:** [WPRDC Allegheny County Property Assessments](https://data.wprdc.org/dataset/property-assessments), an open public dataset. No API key, no cost, CORS allows browser-direct queries.
+- **Fields surfaced:** use, style, year built, stories, finished sq ft, BR/BA, condition, grade, lot area, fair market value, county assessed value, last sale price + date, prior sale, owner of record
+- **Coverage:** every property in Allegheny County. (Pittsburgh-only sources like code violations and liens are planned for a follow-up prompt.)
+- **Parcel ID normalization:** Sheriff PDFs use formats like `556-G-276` or `0033-B-00272`; WPRDC uses a 16-char no-separator format like `0556G00276000000`. The app converts automatically. If the source format doesn't match the standard pattern, you'll see a clear "couldn't normalize" message with a link to look the property up manually.
+- **Caching:** results are cached in IndexedDB's `geo-data-cache` store for 30 days, keyed by normalized parcel ID. A **Refresh** link on the Property Assessment card bypasses the cache.
+- **Spread analysis:** ARV − opening bid, plus margin if won at max bid. ARV defaults to WPRDC fair market value but uses your `arvOverride` if you've set one on this property.
 
 ## Storage
 
@@ -162,6 +182,10 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   │   ├── chunking.js           ← splits a PDF into N-page chunks via pdf-lib
 │   │   ├── claude.js             ← Anthropic API wrapper (browser fetch)
 │   │   └── prompts.js            ← system prompt + property schema
+│   ├── enrichment/
+│   │   ├── normalize.js          ← Sheriff parcel ID → WPRDC PARID
+│   │   ├── wprdc.js              ← WPRDC CKAN API wrapper
+│   │   └── assessor.js           ← cache-aware assessor lookup (30-day TTL)
 │   └── ui/                       ← shared bits (nav, formatters)
 ├── index.html
 ├── package.json

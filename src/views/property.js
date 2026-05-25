@@ -1,5 +1,6 @@
 import { getProperty, updateUserFields } from '../storage/properties.js'
 import { getUpload, getUploadBlob } from '../storage/uploads.js'
+import { getAssessor } from '../enrichment/assessor.js'
 import { formatMonth, escapeHtml, escapeAttr } from '../ui/format.js'
 
 export async function renderProperty(el, params) {
@@ -32,6 +33,7 @@ export async function renderProperty(el, params) {
 
   wireUserFieldsAutoSave(el, prop)
   wireSourcePdfLinks(el)
+  loadEnrichment(el, prop, current)
 }
 
 // ─── Top-level shell ───────────────────────────────────────────────────────
@@ -60,6 +62,7 @@ function renderShell(prop, current, uploadsByHistory) {
 
     ${renderUserFieldsCard(prop)}
     ${renderSaleInfoCard(prop, current)}
+    ${renderEnrichmentPlaceholder()}
     ${prop.tracts > 1 ? renderMultiTractCard(prop) : ''}
     ${renderHistoryCard(prop, uploadsByHistory)}
     ${renderCommentsCard(prop)}
@@ -353,4 +356,208 @@ function renderCommentsCard(prop) {
       </div>
     </div>
   `
+}
+
+// ─── Property Assessment (WPRDC enrichment) + Spread analysis ──────────────
+
+function renderEnrichmentPlaceholder() {
+  return `
+    <div class="card" id="enrichment-zone">
+      <h3 style="margin-top:0;">Property Assessment</h3>
+      <p class="muted small">Loading assessor data from WPRDC…</p>
+    </div>
+  `
+}
+
+async function loadEnrichment(el, prop, current, { force = false } = {}) {
+  const zone = el.querySelector('#enrichment-zone')
+  if (!zone) return
+
+  const result = await getAssessor(prop.parcelId, { force })
+  zone.outerHTML = renderEnrichmentCard(prop, current, result)
+
+  // Rewire any event handlers inside the freshly-rendered card.
+  const newZone = el.querySelector('#enrichment-zone')
+  const refreshBtn = newZone?.querySelector('#refresh-assessor')
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async (e) => {
+      e.preventDefault()
+      // Replace card with loading state then re-call with force.
+      newZone.outerHTML = renderEnrichmentPlaceholder()
+      loadEnrichment(el, prop, current, { force: true })
+    })
+  }
+}
+
+function renderEnrichmentCard(prop, current, result) {
+  const refreshLink = `<a href="#" id="refresh-assessor" class="small">Refresh</a>`
+
+  if (result.status === 'normalize-failed') {
+    return `
+      <div class="card" id="enrichment-zone">
+        <h3 style="margin-top:0;">Property Assessment</h3>
+        <div class="banner warn">
+          Couldn't normalize parcel ID <code>${escapeHtml(prop.parcelId || '?')}</code> to the
+          WPRDC format. The Sheriff PDF may have used an unusual format. You can look this
+          property up manually at
+          <a href="https://www2.alleghenycounty.us/RealEstate/" target="_blank" rel="noopener">
+            Allegheny County Real Estate
+          </a>.
+        </div>
+      </div>
+    `
+  }
+
+  if (result.status === 'error') {
+    return `
+      <div class="card" id="enrichment-zone">
+        <h3 style="margin-top:0;">Property Assessment</h3>
+        <div class="banner err">
+          Failed to fetch assessor data: ${escapeHtml(result.error)}
+        </div>
+        <div class="row">${refreshLink}</div>
+      </div>
+    `
+  }
+
+  if (result.status === 'not-found') {
+    return `
+      <div class="card" id="enrichment-zone">
+        <h3 style="margin-top:0;">Property Assessment</h3>
+        <div class="banner warn">
+          No assessor record found for parcel <code>${escapeHtml(result.parid)}</code>.
+          This could mean the parcel was recently subdivided/merged, or the Sheriff PDF's parcel format doesn't match WPRDC's.
+        </div>
+        <div class="row">${refreshLink}</div>
+      </div>
+    `
+  }
+
+  // status === 'ok'
+  const d = result.data
+  return `
+    <div class="card" id="enrichment-zone">
+      <h3 style="margin-top:0;">Property Assessment</h3>
+
+      <div class="row" style="gap:24px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:240px;">
+          <h4 class="muted small" style="margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.04em;">Building</h4>
+          ${kv('Use', d.USEDESC)}
+          ${kv('Style', d.STYLEDESC)}
+          ${kv('Year built', d.YEARBLT ? Math.round(d.YEARBLT) : null)}
+          ${kv('Stories', d.STORIES)}
+          ${kv('Finished sq ft', d.FINISHEDLIVINGAREA ? Math.round(d.FINISHEDLIVINGAREA).toLocaleString() : null)}
+          ${kv('Bedrooms', d.BEDROOMS != null ? d.BEDROOMS : null)}
+          ${kv('Full baths', d.FULLBATHS != null ? d.FULLBATHS : null)}
+          ${kv('Half baths', d.HALFBATHS != null ? d.HALFBATHS : null)}
+          ${kv('Condition', d.CONDITIONDESC)}
+          ${kv('Grade', d.GRADEDESC)}
+          ${kv('Lot area (sq ft)', d.LOTAREA ? Math.round(d.LOTAREA).toLocaleString() : null)}
+        </div>
+
+        <div style="flex:1;min-width:240px;">
+          <h4 class="muted small" style="margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.04em;">Valuation</h4>
+          ${kv('Fair market value', money(d.FAIRMARKETTOTAL))}
+          ${kv('County assessed', money(d.COUNTYTOTAL))}
+          ${kv('Last sale', formatSale(d.SALEDATE, d.SALEPRICE))}
+          ${d.PREVSALEDATE ? kv('Prior sale', formatSale(d.PREVSALEDATE, d.PREVSALEPRICE)) : ''}
+          ${kv('Owner of record', d.CHANGENOTICEADDRESS1)}
+        </div>
+      </div>
+
+      <div class="spacer"></div>
+      ${renderSpread(prop, current, d)}
+
+      <div class="row" style="margin-top:12px;justify-content:space-between;">
+        <span class="muted small">
+          ${result.fromCache
+            ? `From cache, fetched ${formatRelative(result.fetchedAt)}.`
+            : `Just fetched from WPRDC.`}
+        </span>
+        ${refreshLink}
+      </div>
+    </div>
+  `
+}
+
+function renderSpread(prop, current, assessorData) {
+  const fairMarket = assessorData.FAIRMARKETTOTAL || null
+  const openingBid = current.openingBid ?? null
+  const userMaxBid = prop.userFields?.maxBid ?? null
+  const userArvOverride = prop.userFields?.arvOverride ?? null
+
+  // ARV = user's override if set, else WPRDC fair market value.
+  const arv = userArvOverride ?? fairMarket
+  const arvSource = userArvOverride != null ? 'your override' : 'WPRDC fair-market value'
+
+  if (arv == null || openingBid == null) {
+    return `
+      <h4 class="muted small" style="margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.04em;">Spread analysis</h4>
+      <p class="muted small">Need both an ARV and an opening bid to compute spread.</p>
+    `
+  }
+
+  const spreadOpen = arv - openingBid
+  const marginIfWon = userMaxBid != null ? arv - userMaxBid : null
+
+  return `
+    <h4 class="muted small" style="margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.04em;">Spread analysis</h4>
+    <div class="row" style="gap:12px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:200px;">
+        ${kv('Opening bid', money(openingBid))}
+        ${kv('ARV (' + arvSource + ')', money(arv))}
+        ${kv('Spread at opening', signedMoneyHtml(spreadOpen))}
+      </div>
+      <div style="flex:1;min-width:200px;">
+        ${kv('Your max bid', userMaxBid != null ? money(userMaxBid) : '<span class="muted">not set</span>')}
+        ${marginIfWon != null
+          ? kv('Margin if won at max', signedMoneyHtml(marginIfWon))
+          : kv('Margin if won at max', '<span class="muted">set a max bid above</span>')}
+      </div>
+    </div>
+  `
+}
+
+// ─── Small formatting helpers used by the enrichment card ─────────────────
+
+function kv(label, value) {
+  return `
+    <div class="row" style="padding:4px 0;font-size:14px;">
+      <span class="muted small" style="min-width:140px;">${escapeHtml(label)}</span>
+      <span>${value != null && value !== '' ? value : '<span class="muted">—</span>'}</span>
+    </div>
+  `
+}
+
+function money(n) {
+  if (n == null || !Number.isFinite(Number(n))) return null
+  return '$' + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 })
+}
+
+function signedMoneyHtml(n) {
+  if (n == null || !Number.isFinite(Number(n))) return null
+  const sign = n >= 0 ? '+' : '−'
+  const abs = Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })
+  const color = n >= 0 ? 'var(--color-ok)' : 'var(--color-err)'
+  return `<strong style="color:${color}">${sign}$${abs}</strong>`
+}
+
+function formatSale(date, price) {
+  if (!date && price == null) return null
+  const m = money(price)
+  if (m && date) return `${m} on ${escapeHtml(date)}`
+  if (m) return m
+  return escapeHtml(date)
+}
+
+function formatRelative(ts) {
+  const diffMs = Date.now() - ts
+  const sec = Math.floor(diffMs / 1000)
+  if (sec < 60) return 'just now'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} min ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`
+  const day = Math.floor(hr / 24)
+  return `${day} day${day === 1 ? '' : 's'} ago`
 }
