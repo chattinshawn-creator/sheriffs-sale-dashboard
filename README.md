@@ -21,7 +21,7 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
   - Failed chunks listed with a "Retry failed pages" button — successful chunks don't get re-spent
 - Home view supports filter + sort + search:
   - Search box matches substrings across address, case #, defendant, parcel ID, municipality, plaintiff
-  - Sort dropdown: Sale month (grouped), Opening bid asc/desc, Status priority, Case #, Address
+  - Sort dropdown: Sale month (grouped), **Spread (best deals first)**, Opening bid asc/desc, Status priority, Case #, Address. Spread = ARV − opening bid; ARV is your override if set, else the WPRDC fair-market value from bulk enrichment. Properties with no spread data sort to the bottom.
   - Status chips: Active / Postponed / Stayed / Sold — click to toggle
   - Flag chips: Interested / Skip / Unflagged
   - "Only show needs-review" toggle for triage

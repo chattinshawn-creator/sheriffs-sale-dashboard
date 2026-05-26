@@ -30,6 +30,7 @@ const FLAG_OPTIONS = [
 ]
 const SORT_OPTIONS = [
   { key: 'sale-month',  label: 'Sale month (grouped)' },
+  { key: 'spread-desc', label: 'Spread (best deals first)' },
   { key: 'bid-desc',    label: 'Opening bid (high → low)' },
   { key: 'bid-asc',     label: 'Opening bid (low → high)' },
   { key: 'status',      label: 'Status priority' },
@@ -398,6 +399,11 @@ function applyFilters(properties) {
 function applySort(properties) {
   const sorted = [...properties]
   switch (state.sort) {
+    case 'spread-desc':
+      // Best deals first. Properties with unknown spread sort to the bottom
+      // (use -Infinity so they're "smaller" than every known value).
+      sorted.sort((a, b) => (getSpread(b) ?? -Infinity) - (getSpread(a) ?? -Infinity))
+      break
     case 'bid-asc':
       sorted.sort((a, b) =>
         (a.history[0]?.openingBid ?? Number.POSITIVE_INFINITY) -
@@ -488,6 +494,15 @@ function renderPropertyCard(prop, h) {
     flagsHtml.push(`<span class="tag">${prop.tracts} tracts</span>`)
   }
 
+  const spread = getSpread(prop)
+  const spreadHtml = spread != null ? (() => {
+    const color = spread >= 0 ? 'var(--color-ok)' : 'var(--color-err)'
+    const sign = spread >= 0 ? '+' : '−'
+    const abs = Math.abs(spread).toLocaleString(undefined, { maximumFractionDigits: 0 })
+    const source = prop.userFields?.arvOverride != null ? 'your ARV' : 'WPRDC FMV'
+    return `<div class="meta">Spread: <strong style="color:${color}">${sign}$${abs}</strong> <span class="muted">(${source} − opening bid)</span></div>`
+  })() : ''
+
   return `
     <a class="card prop-card" href="#/property/${encodeURIComponent(prop.caseNumber)}">
       <div class="row" style="justify-content:space-between;">
@@ -505,6 +520,7 @@ function renderPropertyCard(prop, h) {
       <div class="meta">
         Status: ${escapeHtml(h.status || '?')}
       </div>
+      ${spreadHtml}
     </a>
   `
 }
@@ -517,6 +533,18 @@ function statusRank(status) {
   if (s.startsWith('postponed')) return 2
   if (s.startsWith('stayed')) return 3
   return 50
+}
+
+/**
+ * ARV − opening bid. ARV is the user's override if set, else the WPRDC
+ * fair-market value from bulk enrichment. Returns null if either side is
+ * unknown — caller should treat null as "no spread to show / sort to bottom."
+ */
+function getSpread(p) {
+  const bid = p.history[0]?.openingBid
+  const arv = p.userFields?.arvOverride ?? p.enrichmentSummary?.fairMarketValue ?? null
+  if (bid == null || arv == null) return null
+  return arv - bid
 }
 
 function isHumanReadableNeighborhood(name) {
