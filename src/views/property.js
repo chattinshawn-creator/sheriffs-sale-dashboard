@@ -4,6 +4,7 @@ import { getAssessor } from '../enrichment/assessor.js'
 import { getViolations } from '../enrichment/violations.js'
 import { getPermits } from '../enrichment/permits.js'
 import { validateProperty } from '../pdf/validation.js'
+import { isHilltopProperty } from '../enrichment/hilltop.js'
 import { formatMonth, escapeHtml, escapeAttr } from '../ui/format.js'
 
 export async function renderProperty(el, params) {
@@ -77,6 +78,10 @@ function renderShell(prop, current, uploadsByHistory) {
 
 function collectFlags(prop, current) {
   const out = []
+  if (isHilltopProperty(prop)) {
+    const nh = prop.enrichmentSummary?.neighborhood || 'Hilltop'
+    out.push(`<span class="tag" style="background:#fed7aa;color:#9a3412;border-color:#fdba74;" title="${escapeAttr(nh)}">Hilltop</span>`)
+  }
   if (prop.commentsParsed?.replenishmentUnpaid) {
     out.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;">replenishment unpaid</span>`)
   }

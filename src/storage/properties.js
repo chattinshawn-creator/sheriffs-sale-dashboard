@@ -45,6 +45,17 @@ export function emptyProperty(caseNumber) {
     // App-derived
     isPittsburghProper: false,
 
+    // Denormalized enrichment summary — populated by bulk enrichment so
+    // Home can filter/badge without reading geoDataCache for each property.
+    // Full enrichment data still lives in geoDataCache; this is a fast-access
+    // subset of the fields we need for triage.
+    enrichmentSummary: {
+      neighborhood: null,    // WPRDC NEIGHDESC (Pittsburgh properties only)
+      ward: null,            // City ward
+      fairMarketValue: null, // WPRDC FAIRMARKETTOTAL
+      yearBuilt: null,       // WPRDC YEARBLT
+    },
+
     // Per-sale history (one entry per monthly upload)
     history: [],
 
@@ -163,6 +174,28 @@ export async function countProperties() {
 
 export async function getProperty(caseNumber) {
   return get(caseNumber, stores.properties)
+}
+
+/**
+ * Merge enrichment-summary fields into an existing property record.
+ * Used by bulk enrichment to denormalize WPRDC values (neighborhood,
+ * ward, fair market value, year built) onto the property so Home can
+ * filter/badge without reading geoDataCache for each property.
+ *
+ * No-op if the property doesn't exist.
+ */
+export async function setEnrichmentSummary(caseNumber, partial) {
+  const existing = await get(caseNumber, stores.properties)
+  if (!existing) return null
+  const merged = {
+    ...existing,
+    enrichmentSummary: {
+      ...(existing.enrichmentSummary || {}),
+      ...partial,
+    },
+  }
+  await set(caseNumber, merged, stores.properties)
+  return merged
 }
 
 /**

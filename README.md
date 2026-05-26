@@ -174,6 +174,21 @@ Both datasets are keyed on the same Allegheny County parcel ID, normalized the s
 
 For properties **outside Pittsburgh proper** (Penn Hills, Munhall, Liberty, etc.), the Pittsburgh data card greys out with an explanation. PLI is a City of Pittsburgh department; surrounding municipalities have their own code enforcement that isn't published through WPRDC. This is the "data unavailable" treatment we designed at the start.
 
+### Hilltop neighborhood flagging
+
+Properties in any of the Pittsburgh Hilltop neighborhoods get an orange "Hilltop" badge on Home and on the per-property page, plus a "Hilltop only" filter on Home for fast triage.
+
+**Tagged neighborhoods:** Allentown, Arlington, Beltzhoover, Bon Air, Carrick, Knoxville, Mt. Oliver Neighborhood, St. Clair, Hays, Lincoln Place, South Side Slopes, Mt. Washington, Duquesne Heights.
+
+Neighborhood data is resolved in four tiers, in order:
+
+1. **PLI violations** — the WPRDC PLI violations dataset has a human-readable `neighborhood` field. Most Pittsburgh parcels have at least one violation record.
+2. **PLI permits** — same `neighborhood` field on the permits dataset; fallback when violations is empty.
+3. **Geocode + point-in-polygon** — for parcels with no PLI history, we geocode the address via the US Census Geocoder (free, no API key) and look up which neighborhood polygon contains the resulting lat/lng. The polygon data comes from `public/neighborhoods.geojson` (Pittsburgh Department of City Planning, ~1.2 MB, loaded lazily on first need).
+4. **Ward-based fallback** — if all of the above fail, the Hilltop badge can still fire based on the assessor's ward (parsed from MUNIDESC). Hilltop wards (Shawn-confirmed): 16, 17, 18, 29, 30, 32.
+
+The bulk enrich runs all four tiers as needed and stores the resulting neighborhood + ward on each property's `enrichmentSummary`. Throttled at 200ms per uncached API call to be polite to free public services. Re-running is cheap: cached lookups skip the API.
+
 ### What's NOT enriched (and why)
 
 - **Condemned/unfit property list** — not published as a clean dataset on WPRDC. The city tracks this internally but doesn't expose it for download.
@@ -227,7 +242,11 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   │   ├── wprdc.js              ← WPRDC CKAN API wrapper + dataset IDs
 │   │   ├── assessor.js           ← cache-aware assessor lookup (30-day TTL)
 │   │   ├── violations.js         ← PLI/DOMI/ES violations (Pittsburgh only)
-│   │   └── permits.js            ← PLI permits (Pittsburgh only)
+│   │   ├── permits.js            ← PLI permits (Pittsburgh only)
+│   │   ├── geocode.js            ← US Census Geocoder wrapper (address → lat/lng)
+│   │   ├── neighborhoods.js      ← point-in-polygon against neighborhoods.geojson
+│   │   ├── hilltop.js            ← Hilltop neighborhood list + matcher
+│   │   └── bulk.js               ← bulk enrich all Pittsburgh properties
 │   └── ui/                       ← shared bits (nav, formatters)
 ├── index.html
 ├── package.json

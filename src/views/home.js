@@ -1,6 +1,8 @@
 import { listUploads } from '../storage/uploads.js'
 import { listProperties } from '../storage/properties.js'
 import { validateProperty } from '../pdf/validation.js'
+import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
+import { enrichAllPittsburghProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
 import { formatMonth, formatBytes, formatDate, escapeHtml, escapeAttr } from '../ui/format.js'
 
 // In-memory filter/sort state. Survives navigation within the session but
@@ -12,6 +14,7 @@ const state = {
   statuses: new Set(['active', 'postponed', 'stayed', 'sold']),
   flags: new Set(['interested', 'skip', 'unflagged']),
   needsReviewOnly: false,
+  hilltopOnly: false,
 }
 
 const STATUS_OPTIONS = [
@@ -79,6 +82,8 @@ function renderShell(uploads, properties) {
 
     ${renderFilterBar()}
 
+    ${renderBulkEnrichBar(properties)}
+
     <div class="row" style="margin:12px 0;justify-content:space-between;">
       <div id="property-count" class="muted small"></div>
       <a href="#" id="clear-filters" class="small">Clear filters</a>
@@ -86,6 +91,86 @@ function renderShell(uploads, properties) {
 
     <div id="property-list"></div>
   `
+}
+
+// ─── Bulk enrichment bar (only shown when there's work to do) ──────────────
+
+function renderBulkEnrichBar(properties) {
+  const pittsburgh = properties.filter(p => p.isPittsburghProper)
+  if (pittsburgh.length === 0) return ''
+  // "Enriched" means: we've attempted enrichment (got SOMETHING back), even
+  // if there were no PLI records to give us a neighborhood. Properties where
+  // we've attempted but found no neighborhood get the ward-based Hilltop
+  // fallback — they don't need re-enrichment.
+  // Also treat pure-numeric stored values as un-enriched (old bug stored
+  // assessor codes like "13001" — those aren't real neighborhood names).
+  const enriched = pittsburgh.filter(p => {
+    const s = p.enrichmentSummary || {}
+    if (!s.attemptedAt) return false
+    if (s.neighborhood && /^\d+$/.test(String(s.neighborhood).trim())) return false
+    return true
+  }).length
+  const remaining = pittsburgh.length - enriched
+  if (remaining === 0) {
+    return `
+      <div class="small muted" style="margin-top:8px;">
+        All ${pittsburgh.length} Pittsburgh properties enriched. <a href="#" id="bulk-enrich-btn">Re-run anyway</a>
+      </div>
+    `
+  }
+  const minutes = Math.max(1, Math.ceil((remaining * 0.4) / 60))
+  return `
+    <div class="card" id="bulk-enrich-card" style="margin-top:12px;background:#fff7ed;border-color:#fed7aa;">
+      <strong>Enrich Pittsburgh properties for neighborhood + Hilltop tagging</strong>
+      <p class="small" style="margin:4px 0;">
+        ${remaining} of ${pittsburgh.length} Pittsburgh properties haven't been enriched yet.
+        Fetches assessor data (neighborhood, year built, fair-market value) from WPRDC.
+        Free, takes ~${minutes} minute${minutes === 1 ? '' : 's'}.
+      </p>
+      <button class="primary" id="bulk-enrich-btn">Enrich ${remaining} properties</button>
+    </div>
+  `
+}
+
+async function runBulkEnrich(el, properties) {
+  const card = el.querySelector('#bulk-enrich-card')
+  if (!card) return
+
+  card.innerHTML = `
+    <strong>Enriching Pittsburgh properties…</strong>
+    <div id="bulk-status" class="small" style="margin:6px 0;">Starting…</div>
+    <div class="progress" style="margin:6px 0;"><div id="bulk-bar" style="width:0%"></div></div>
+    <button id="bulk-cancel">Cancel</button>
+  `
+  el.querySelector('#bulk-cancel').addEventListener('click', () => {
+    cancelBulkEnrichment()
+    el.querySelector('#bulk-status').textContent = 'Cancelling…'
+  })
+
+  const statusEl = el.querySelector('#bulk-status')
+  const barEl = el.querySelector('#bulk-bar')
+
+  await enrichAllPittsburghProperties((info) => {
+    const pct = info.total > 0 ? Math.round((info.processed / info.total) * 100) : 0
+    barEl.style.width = `${pct}%`
+    if (info.status === 'running') {
+      const addr = info.currentAddress ? escapeHtml(info.currentAddress.slice(0, 60)) : ''
+      const nh = info.neighborhood ? ` — <em>${escapeHtml(info.neighborhood)}</em>` : ''
+      statusEl.innerHTML =
+        `Enriched ${info.processed} of ${info.total} • ` +
+        `${info.hilltopSoFar} Hilltop so far${info.errors > 0 ? ` • ${info.errors} errors` : ''}<br>` +
+        `<span class="muted">${addr}${nh}</span>`
+    } else if (info.status === 'cancelled') {
+      statusEl.innerHTML = `<strong>Cancelled</strong> after ${info.processed} of ${info.total} properties. Click the button again later to resume.`
+    } else if (info.status === 'done') {
+      statusEl.innerHTML =
+        `<strong>Done.</strong> Enriched ${info.processed} properties • ` +
+        `${info.hilltopSoFar} flagged as Hilltop${info.errors > 0 ? ` • ${info.errors} errors` : ''}.`
+    }
+  })
+
+  // Re-render the home view so the new neighborhood data shows up everywhere.
+  setTimeout(() => renderHome(el), 1500)
 }
 
 function renderUploadsArchive(uploads) {
@@ -162,6 +247,11 @@ function renderFilterBar() {
           <input type="checkbox" id="needs-review-toggle" ${state.needsReviewOnly ? 'checked' : ''} />
           Only show "needs review"
         </label>
+        <label class="small" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-left:16px;"
+               title="Hilltop neighborhoods: ${escapeAttr(HILLTOP_LIST_LABEL.join(', '))}">
+          <input type="checkbox" id="hilltop-toggle" ${state.hilltopOnly ? 'checked' : ''} />
+          Hilltop only
+        </label>
       </div>
     </div>
   `
@@ -193,6 +283,16 @@ function wireControls(el, properties) {
     state.needsReviewOnly = e.target.checked
     renderPropertyList(el, properties)
   })
+
+  el.querySelector('#hilltop-toggle').addEventListener('change', (e) => {
+    state.hilltopOnly = e.target.checked
+    renderPropertyList(el, properties)
+  })
+
+  const bulkBtn = el.querySelector('#bulk-enrich-btn')
+  if (bulkBtn) {
+    bulkBtn.addEventListener('click', () => runBulkEnrich(el, properties))
+  }
 
   el.querySelectorAll('.chip').forEach(chipEl => {
     chipEl.addEventListener('click', () => {
@@ -284,6 +384,9 @@ function applyFilters(properties) {
       if (v.ok) return false
     }
 
+    // Hilltop filter
+    if (state.hilltopOnly && !isHilltopProperty(p)) return false
+
     return true
   })
 }
@@ -367,6 +470,10 @@ function renderPropertyCard(prop, h) {
   if (prop.userFields?.flag === 'skip') {
     flagsHtml.push(`<span class="tag" style="background:#e5e7eb;color:#374151;border-color:#d1d5db;">skip</span>`)
   }
+  if (isHilltopProperty(prop)) {
+    const nh = prop.enrichmentSummary?.neighborhood || 'Hilltop'
+    flagsHtml.push(`<span class="tag" style="background:#fed7aa;color:#9a3412;border-color:#fdba74;" title="${escapeAttr(nh)}">Hilltop</span>`)
+  }
   if (prop.commentsParsed?.replenishmentUnpaid) {
     flagsHtml.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;">replenishment unpaid</span>`)
   }
@@ -406,4 +513,11 @@ function statusRank(status) {
   if (s.startsWith('postponed')) return 2
   if (s.startsWith('stayed')) return 3
   return 50
+}
+
+function isHumanReadableNeighborhood(name) {
+  if (!name) return false
+  // Old bug stored assessor codes like "13001" or "11102" — pure digits
+  // aren't real Pittsburgh neighborhood names.
+  return !/^\d+$/.test(String(name).trim())
 }
