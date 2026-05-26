@@ -19,7 +19,15 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
   - Same case number across multiple months collapses into one canonical record with a `history[]` of per-month statuses, opening bids, and sale outcomes
   - Comments block parsed for postponement history, bankruptcy filings, replenishment-unpaid flag, stayed notes, sold notes
   - Failed chunks listed with a "Retry failed pages" button — successful chunks don't get re-spent
-- Home view groups uploads and parsed properties by sale month, sorted by status (Sold → Active → Postponed → Stayed) then opening bid
+- Home view supports filter + sort + search:
+  - Search box matches substrings across address, case #, defendant, parcel ID, municipality, plaintiff
+  - Sort dropdown: Sale month (grouped), Opening bid asc/desc, Status priority, Case #, Address
+  - Status chips: Active / Postponed / Stayed / Sold — click to toggle
+  - Flag chips: Interested / Skip / Unflagged
+  - "Only show needs-review" toggle for triage
+  - "Showing N of M" counter and Clear filters link
+  - Each property appears once under its most recent sale month (not under every month it appeared in — see the per-property history table for that)
+- Uploads archive collapses into a `<details>` element at the top to save screen space when you're working with hundreds of properties
 - Click any property card on Home to open a per-property page with:
   - Full sale info (plaintiff, attorney, defendant, sale type, etc.)
   - Inline edit form for your max bid, ARV override, interested/skip flag, and notes — auto-saves on blur

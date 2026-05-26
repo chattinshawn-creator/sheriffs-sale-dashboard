@@ -1,7 +1,38 @@
 import { listUploads } from '../storage/uploads.js'
 import { listProperties } from '../storage/properties.js'
 import { validateProperty } from '../pdf/validation.js'
-import { formatMonth, formatBytes, formatDate, escapeHtml } from '../ui/format.js'
+import { formatMonth, formatBytes, formatDate, escapeHtml, escapeAttr } from '../ui/format.js'
+
+// In-memory filter/sort state. Survives navigation within the session but
+// resets on full page refresh — that's fine for V1; we can persist to URL
+// hash later if you want shareable filtered views.
+const state = {
+  search: '',
+  sort: 'sale-month',
+  statuses: new Set(['active', 'postponed', 'stayed', 'sold']),
+  flags: new Set(['interested', 'skip', 'unflagged']),
+  needsReviewOnly: false,
+}
+
+const STATUS_OPTIONS = [
+  { key: 'active',    label: 'Active' },
+  { key: 'postponed', label: 'Postponed' },
+  { key: 'stayed',    label: 'Stayed' },
+  { key: 'sold',      label: 'Sold' },
+]
+const FLAG_OPTIONS = [
+  { key: 'interested', label: 'Interested' },
+  { key: 'skip',       label: 'Skip' },
+  { key: 'unflagged',  label: 'Unflagged' },
+]
+const SORT_OPTIONS = [
+  { key: 'sale-month',  label: 'Sale month (grouped)' },
+  { key: 'bid-desc',    label: 'Opening bid (high → low)' },
+  { key: 'bid-asc',     label: 'Opening bid (low → high)' },
+  { key: 'status',      label: 'Status priority' },
+  { key: 'case',        label: 'Case number' },
+  { key: 'address',     label: 'Address' },
+]
 
 export async function renderHome(el) {
   const [uploads, properties] = await Promise.all([
@@ -21,71 +52,59 @@ export async function renderHome(el) {
     return
   }
 
-  // Group uploads by saleMonth
-  const uploadsByMonth = new Map()
+  el.innerHTML = renderShell(uploads, properties)
+  wireControls(el, properties)
+  renderPropertyList(el, properties)
+}
+
+// ─── Top-level shell ───────────────────────────────────────────────────────
+
+function renderShell(uploads, properties) {
+  const propsTotal = properties.length
+  return `
+    <h1 style="margin-bottom:4px;">Home</h1>
+    <p class="muted" style="margin-top:0;">
+      ${propsTotal} propert${propsTotal === 1 ? 'y' : 'ies'} across
+      ${uploads.length} upload${uploads.length === 1 ? '' : 's'}.
+    </p>
+
+    <details style="margin-bottom:20px;">
+      <summary style="cursor:pointer;font-weight:500;font-size:14px;color:var(--color-muted);">
+        Uploads archive (${uploads.length})
+      </summary>
+      <div style="margin-top:8px;">
+        ${renderUploadsArchive(uploads)}
+      </div>
+    </details>
+
+    ${renderFilterBar()}
+
+    <div class="row" style="margin:12px 0;justify-content:space-between;">
+      <div id="property-count" class="muted small"></div>
+      <a href="#" id="clear-filters" class="small">Clear filters</a>
+    </div>
+
+    <div id="property-list"></div>
+  `
+}
+
+function renderUploadsArchive(uploads) {
+  const byMonth = new Map()
   for (const u of uploads) {
     const m = u.saleMonth || 'Unknown'
-    if (!uploadsByMonth.has(m)) uploadsByMonth.set(m, [])
-    uploadsByMonth.get(m).push(u)
+    if (!byMonth.has(m)) byMonth.set(m, [])
+    byMonth.get(m).push(u)
   }
-
-  // Group properties by every saleMonth they appear in (a property postponed
-  // across multiple sales shows up under each of those months).
-  const propsByMonth = new Map()
-  for (const prop of properties) {
-    for (const h of prop.history) {
-      const m = h.saleMonth || 'Unknown'
-      if (!propsByMonth.has(m)) propsByMonth.set(m, [])
-      propsByMonth.get(m).push({ prop, historyEntry: h })
-    }
-  }
-
-  // Sort properties within each month by status (Active first, then Postponed,
-  // then Stayed/other), then by opening bid descending for browsing.
-  for (const list of propsByMonth.values()) {
-    list.sort((a, b) => {
-      const sa = statusRank(a.historyEntry.status)
-      const sb = statusRank(b.historyEntry.status)
-      if (sa !== sb) return sa - sb
-      const ba = a.historyEntry.openingBid ?? 0
-      const bb = b.historyEntry.openingBid ?? 0
-      return bb - ba
-    })
-  }
-
-  const allMonths = new Set([...uploadsByMonth.keys(), ...propsByMonth.keys()])
-  const sortedMonths = [...allMonths].sort((a, b) => b.localeCompare(a))
-
-  let html = `<h1>Home</h1>`
-
-  if (properties.length === 0) {
-    html += `
-      <div class="banner info">
-        ${uploads.length} upload${uploads.length === 1 ? '' : 's'} in your archive.
-        No properties parsed yet — open an upload below and click <strong>Parse PDF</strong> to extract.
-      </div>
-    `
-  } else {
-    html += `
-      <div class="banner info">
-        ${properties.length} unique propert${properties.length === 1 ? 'y' : 'ies'}
-        across ${uploads.length} upload${uploads.length === 1 ? '' : 's'}.
-      </div>
-    `
-  }
-
-  for (const month of sortedMonths) {
-    const monthLabel = month === 'Unknown' ? 'Unknown month' : formatMonth(month)
-    html += `<h2>${escapeHtml(monthLabel)}</h2>`
-
-    // Uploads block
-    for (const u of (uploadsByMonth.get(month) || [])) {
+  const months = [...byMonth.keys()].sort((a, b) => b.localeCompare(a))
+  return months.map(month => {
+    const label = month === 'Unknown' ? 'Unknown month' : formatMonth(month)
+    const cards = byMonth.get(month).map(u => {
       const parsedBadge = u.parsed
         ? `<span class="indicator present">parsed</span>`
         : u.lastParsedAt
           ? `<span class="indicator absent">partially parsed</span>`
           : `<span class="indicator absent">not parsed</span>`
-      html += `
+      return `
         <div class="card">
           <div class="row">
             <span class="tag ${u.type}">${u.type}</span>
@@ -99,24 +118,235 @@ export async function renderHome(el) {
           </div>
         </div>
       `
-    }
+    }).join('')
+    return `<h3 class="muted small" style="margin:12px 0 6px 0;">${escapeHtml(label)}</h3>${cards}`
+  }).join('')
+}
 
-    // Properties block
-    const monthProps = propsByMonth.get(month) || []
-    if (monthProps.length > 0) {
-      html += `
-        <h3 class="muted small" style="margin-top:20px;margin-bottom:8px;">
-          ${monthProps.length} propert${monthProps.length === 1 ? 'y' : 'ies'}
-        </h3>
-      `
-      for (const { prop, historyEntry } of monthProps) {
-        html += renderPropertyCard(prop, historyEntry)
-      }
-    }
+// ─── Filter bar ────────────────────────────────────────────────────────────
+
+function renderFilterBar() {
+  const sortOpts = SORT_OPTIONS.map(o =>
+    `<option value="${escapeAttr(o.key)}" ${state.sort === o.key ? 'selected' : ''}>${escapeHtml(o.label)}</option>`
+  ).join('')
+
+  const statusChips = STATUS_OPTIONS.map(o =>
+    chip('status', o.key, o.label, state.statuses.has(o.key))
+  ).join('')
+  const flagChips = FLAG_OPTIONS.map(o =>
+    chip('flag', o.key, o.label, state.flags.has(o.key))
+  ).join('')
+
+  return `
+    <div class="filter-bar">
+      <div class="row" style="gap:8px;align-items:center;">
+        <input type="search" id="search-input" placeholder="Search address, case, defendant, parcel…"
+               value="${escapeAttr(state.search)}"
+               style="flex:1;min-width:240px;max-width:none;" />
+        <label class="small muted" for="sort-select">Sort:</label>
+        <select id="sort-select" style="width:auto;">${sortOpts}</select>
+      </div>
+
+      <div class="filter-row">
+        <span class="filter-label">Status:</span>
+        ${statusChips}
+      </div>
+
+      <div class="filter-row">
+        <span class="filter-label">Flag:</span>
+        ${flagChips}
+      </div>
+
+      <div class="filter-row">
+        <label class="small" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="needs-review-toggle" ${state.needsReviewOnly ? 'checked' : ''} />
+          Only show "needs review"
+        </label>
+      </div>
+    </div>
+  `
+}
+
+function chip(group, key, label, active) {
+  return `
+    <button type="button" class="chip ${active ? 'active' : ''}"
+            data-filter-group="${escapeAttr(group)}" data-filter-key="${escapeAttr(key)}">
+      ${escapeHtml(label)}
+    </button>
+  `
+}
+
+// ─── Wire interactivity ────────────────────────────────────────────────────
+
+function wireControls(el, properties) {
+  el.querySelector('#search-input').addEventListener('input', (e) => {
+    state.search = e.target.value
+    renderPropertyList(el, properties)
+  })
+
+  el.querySelector('#sort-select').addEventListener('change', (e) => {
+    state.sort = e.target.value
+    renderPropertyList(el, properties)
+  })
+
+  el.querySelector('#needs-review-toggle').addEventListener('change', (e) => {
+    state.needsReviewOnly = e.target.checked
+    renderPropertyList(el, properties)
+  })
+
+  el.querySelectorAll('.chip').forEach(chipEl => {
+    chipEl.addEventListener('click', () => {
+      const group = chipEl.dataset.filterGroup
+      const key = chipEl.dataset.filterKey
+      const targetSet = group === 'status' ? state.statuses : state.flags
+      if (targetSet.has(key)) targetSet.delete(key)
+      else targetSet.add(key)
+      chipEl.classList.toggle('active')
+      renderPropertyList(el, properties)
+    })
+  })
+
+  el.querySelector('#clear-filters').addEventListener('click', (e) => {
+    e.preventDefault()
+    state.search = ''
+    state.sort = 'sale-month'
+    state.statuses = new Set(['active', 'postponed', 'stayed', 'sold'])
+    state.flags = new Set(['interested', 'skip', 'unflagged'])
+    state.needsReviewOnly = false
+    // Full re-render to reset all the controls.
+    renderHome(el)
+  })
+}
+
+// ─── Filter + sort + render the property list ──────────────────────────────
+
+function renderPropertyList(el, allProperties) {
+  const visible = applyFilters(allProperties)
+  const sorted = applySort(visible)
+
+  el.querySelector('#property-count').textContent =
+    `Showing ${sorted.length} of ${allProperties.length} propert${allProperties.length === 1 ? 'y' : 'ies'}`
+
+  const listEl = el.querySelector('#property-list')
+  if (sorted.length === 0) {
+    listEl.innerHTML = `
+      <div class="banner info">No properties match your filters.
+        <a href="#" id="empty-clear">Clear filters</a> to see all ${allProperties.length}.
+      </div>
+    `
+    listEl.querySelector('#empty-clear').addEventListener('click', (e) => {
+      e.preventDefault()
+      el.querySelector('#clear-filters').click()
+    })
+    return
   }
 
-  el.innerHTML = html
+  if (state.sort === 'sale-month') {
+    listEl.innerHTML = renderGroupedByMonth(sorted)
+  } else {
+    listEl.innerHTML = sorted.map(p => renderPropertyCard(p, p.history[0] || {})).join('')
+  }
 }
+
+function applyFilters(properties) {
+  const q = state.search.trim().toLowerCase()
+  return properties.filter(p => {
+    // Substring search across multiple text fields
+    if (q) {
+      const hay = [p.address, p.caseNumber, p.defendant, p.parcelId, p.municipality, p.plaintiff]
+        .filter(Boolean).join(' ').toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+
+    // Status filter — match against CURRENT status (most recent history entry)
+    const status = String(p.history[0]?.status || '').toLowerCase()
+    const statusKey =
+      /^active/.test(status)    ? 'active' :
+      /^postponed/.test(status) ? 'postponed' :
+      /^stayed/.test(status)    ? 'stayed' :
+      /^sold/.test(status)      ? 'sold' : null
+    if (statusKey && !state.statuses.has(statusKey)) return false
+    if (!statusKey && state.statuses.size < STATUS_OPTIONS.length) {
+      // Unknown status — only show if all status filters are on
+      return false
+    }
+
+    // Flag filter
+    const flag = p.userFields?.flag
+    const flagKey = flag === 'interested' ? 'interested'
+                  : flag === 'skip'       ? 'skip'
+                  : 'unflagged'
+    if (!state.flags.has(flagKey)) return false
+
+    // Needs-review filter
+    if (state.needsReviewOnly) {
+      const v = validateProperty(p)
+      if (v.ok) return false
+    }
+
+    return true
+  })
+}
+
+function applySort(properties) {
+  const sorted = [...properties]
+  switch (state.sort) {
+    case 'bid-asc':
+      sorted.sort((a, b) =>
+        (a.history[0]?.openingBid ?? Number.POSITIVE_INFINITY) -
+        (b.history[0]?.openingBid ?? Number.POSITIVE_INFINITY))
+      break
+    case 'bid-desc':
+      sorted.sort((a, b) =>
+        (b.history[0]?.openingBid ?? Number.NEGATIVE_INFINITY) -
+        (a.history[0]?.openingBid ?? Number.NEGATIVE_INFINITY))
+      break
+    case 'status':
+      sorted.sort((a, b) => statusRank(a.history[0]?.status) - statusRank(b.history[0]?.status))
+      break
+    case 'case':
+      sorted.sort((a, b) => (a.caseNumber || '').localeCompare(b.caseNumber || ''))
+      break
+    case 'address':
+      sorted.sort((a, b) => (a.address || '').localeCompare(b.address || ''))
+      break
+    case 'sale-month':
+    default:
+      sorted.sort((a, b) => {
+        const ma = a.history[0]?.saleMonth || ''
+        const mb = b.history[0]?.saleMonth || ''
+        if (mb !== ma) return mb.localeCompare(ma)
+        const sa = statusRank(a.history[0]?.status)
+        const sb = statusRank(b.history[0]?.status)
+        if (sa !== sb) return sa - sb
+        return (b.history[0]?.openingBid ?? 0) - (a.history[0]?.openingBid ?? 0)
+      })
+  }
+  return sorted
+}
+
+function renderGroupedByMonth(properties) {
+  const byMonth = new Map()
+  for (const p of properties) {
+    const m = p.history[0]?.saleMonth || 'Unknown'
+    if (!byMonth.has(m)) byMonth.set(m, [])
+    byMonth.get(m).push(p)
+  }
+  const months = [...byMonth.keys()].sort((a, b) => b.localeCompare(a))
+
+  return months.map(month => {
+    const label = month === 'Unknown' ? 'Unknown month' : formatMonth(month)
+    const cards = byMonth.get(month)
+      .map(p => renderPropertyCard(p, p.history[0] || {}))
+      .join('')
+    return `
+      <h2>${escapeHtml(label)} <span class="muted small" style="font-weight:normal;">(${byMonth.get(month).length})</span></h2>
+      ${cards}
+    `
+  }).join('')
+}
+
+// ─── Property card ─────────────────────────────────────────────────────────
 
 function renderPropertyCard(prop, h) {
   const bid = h.openingBid != null
@@ -125,18 +355,23 @@ function renderPropertyCard(prop, h) {
   const sold = h.soldFor != null
     ? ` • <strong>Sold for $${h.soldFor.toLocaleString()}</strong> to ${escapeHtml(h.soldTo || '?')}`
     : ''
-  // Re-validate at display time so existing records pick up rule updates
-  // (e.g. new case-prefix support) without needing a full re-parse.
+
   const liveValidation = validateProperty(prop)
   const flagsHtml = []
   if (!liveValidation.ok) {
     flagsHtml.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;" title="${escapeHtml(liveValidation.issues.join('; '))}">needs review</span>`)
   }
+  if (prop.userFields?.flag === 'interested') {
+    flagsHtml.push(`<span class="tag" style="background:#d1fae5;color:#065f46;border-color:#a7f3d0;">interested</span>`)
+  }
+  if (prop.userFields?.flag === 'skip') {
+    flagsHtml.push(`<span class="tag" style="background:#e5e7eb;color:#374151;border-color:#d1d5db;">skip</span>`)
+  }
   if (prop.commentsParsed?.replenishmentUnpaid) {
     flagsHtml.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;">replenishment unpaid</span>`)
   }
   if ((prop.commentsParsed?.bankruptcyHistory || []).length > 0) {
-    flagsHtml.push(`<span class="tag" style="background:#fef3c7;color:#b45309;border-color:#fde68a;">bankruptcy history</span>`)
+    flagsHtml.push(`<span class="tag" style="background:#fef3c7;color:#b45309;border-color:#fde68a;">bankruptcy</span>`)
   }
   if (prop.tracts > 1) {
     flagsHtml.push(`<span class="tag">${prop.tracts} tracts</span>`)
@@ -163,7 +398,6 @@ function renderPropertyCard(prop, h) {
   `
 }
 
-// Sort weight for statuses on the home view. Lower number = shown first.
 function statusRank(status) {
   if (!status) return 99
   const s = status.toLowerCase()
