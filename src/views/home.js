@@ -189,12 +189,16 @@ function renderUploadsArchive(uploads) {
         : u.lastParsedAt
           ? `<span class="indicator absent">partially parsed</span>`
           : `<span class="indicator absent">not parsed</span>`
+      const reparseLabel = u.lastParsedAt ? 'Re-parse' : 'Parse'
       return `
         <div class="card">
-          <div class="row">
-            <span class="tag ${u.type}">${u.type}</span>
-            <strong>${escapeHtml(u.filename)}</strong>
-            ${parsedBadge}
+          <div class="row" style="justify-content:space-between;">
+            <div class="row">
+              <span class="tag ${u.type}">${u.type}</span>
+              <strong>${escapeHtml(u.filename)}</strong>
+              ${parsedBadge}
+            </div>
+            <a href="#/upload/${encodeURIComponent(u.id)}" class="small">${reparseLabel}</a>
           </div>
           <div class="meta">
             ${u.pageCount} page${u.pageCount === 1 ? '' : 's'} •

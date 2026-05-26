@@ -16,6 +16,7 @@ renderNav(navEl)
 
 registerRoute('/', renderHome)
 registerRoute('/upload', renderUpload)
+registerRoute('/upload/:uploadId', renderUpload)
 registerRoute('/settings', renderSettings)
 registerRoute('/property/:caseNumber', renderProperty)
 

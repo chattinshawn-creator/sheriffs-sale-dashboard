@@ -1,10 +1,36 @@
-import { saveUpload, findDuplicate, countUploads } from '../storage/uploads.js'
+import { saveUpload, findDuplicate, countUploads, getUpload } from '../storage/uploads.js'
 import { noteLastUpload, getApiKey } from '../storage/settings.js'
 import { parsePdf, estimateCost } from '../pdf/parse.js'
 import { DEFAULT_CHUNK_PAGES } from '../pdf/chunking.js'
 import { formatBytes, formatMonth, guessFromFilename, escapeHtml } from '../ui/format.js'
 
-export async function renderUpload(el) {
+export async function renderUpload(el, params) {
+  // Re-parse mode: entered via /upload/:uploadId. Skip the file picker and
+  // jump straight to the parse flow for an existing upload.
+  if (params?.uploadId) {
+    const upload = await getUpload(params.uploadId)
+    if (!upload) {
+      el.innerHTML = `
+        <h1>Re-parse</h1>
+        <div class="banner err">No upload found with id <code>${escapeHtml(params.uploadId)}</code>.</div>
+        <p><a href="#/">← Back to Home</a></p>
+      `
+      return
+    }
+    el.innerHTML = `
+      <h1>Re-parse <span style="font-weight:normal;color:var(--color-muted);font-size:18px;">${escapeHtml(upload.filename)}</span></h1>
+      <p class="muted">
+        Re-running the parser on this existing upload. The original file is unchanged.
+        Re-parsing overwrites the previous parser output for each case # found.
+        Your notes, max bids, and flags are preserved.
+      </p>
+      <div id="staging"></div>
+    `
+    renderSavedCard(el.querySelector('#staging'), { upload, total: null, mode: 'reparse' })
+    return
+  }
+
+  // Fresh-upload mode (default).
   el.innerHTML = `
     <h1>Upload a PDF</h1>
     <p class="muted">
@@ -144,11 +170,16 @@ function renderStagingCard(stagingEl, { file, pageCount, guess, duplicate }) {
   })
 }
 
-function renderSavedCard(stagingEl, { upload, total }) {
+function renderSavedCard(stagingEl, { upload, total, mode = 'fresh' }) {
+  const banner = mode === 'reparse'
+    ? '' // re-parse mode has its own header above; no extra banner needed
+    : `
+      <div class="banner ok">
+        <strong>Added.</strong> "${escapeHtml(upload.filename)}" is upload #${total} in your archive.
+      </div>
+    `
   stagingEl.innerHTML = `
-    <div class="banner ok">
-      <strong>Added.</strong> "${escapeHtml(upload.filename)}" is upload #${total} in your archive.
-    </div>
+    ${banner}
     <div class="card">
       <div class="row">
         <span class="tag ${upload.type}">${upload.type}</span>
