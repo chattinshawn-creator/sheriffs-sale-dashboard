@@ -50,10 +50,12 @@ export function emptyProperty(caseNumber) {
     // Full enrichment data still lives in geoDataCache; this is a fast-access
     // subset of the fields we need for triage.
     enrichmentSummary: {
-      neighborhood: null,    // WPRDC NEIGHDESC (Pittsburgh properties only)
-      ward: null,            // City ward
+      neighborhood: null,    // human-readable Pittsburgh neighborhood name
+      ward: null,            // City ward (parsed from MUNIDESC)
       fairMarketValue: null, // WPRDC FAIRMARKETTOTAL
       yearBuilt: null,       // WPRDC YEARBLT
+      latitude: null,        // for the map view
+      longitude: null,
     },
 
     // Per-sale history (one entry per monthly upload)

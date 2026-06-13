@@ -55,6 +55,8 @@ export async function enrichAllPittsburghProperties(onProgress = () => {}) {
     let ward = null
     let fairMarketValue = null
     let yearBuilt = null
+    let latitude = null
+    let longitude = null
     let hitApi = false
 
     try {
@@ -71,30 +73,38 @@ export async function enrichAllPittsburghProperties(onProgress = () => {}) {
         ward = parseWardFromMunidesc(d.MUNIDESC)
       }
 
-      // Neighborhood: try violations first (most properties have at least
-      // one record there since the dataset is dense). Fall back to permits.
-      // Last resort: geocode the address and look up the neighborhood
-      // polygon containing it (handles parcels with no PLI history).
+      // Neighborhood + coords: try violations first (most properties have at
+      // least one record there since the dataset is dense). Fall back to
+      // permits. Last resort: geocode the address and look up the
+      // neighborhood polygon containing it.
       const violationsRes = await getViolations(prop.parcelId)
       if (violationsRes.fromCache === false) hitApi = true
       neighborhood = firstNonEmpty(violationsRes.data, 'neighborhood')
+      ;({ latitude, longitude } = firstLatLng(violationsRes.data) || { latitude: null, longitude: null })
 
-      if (!neighborhood) {
+      if (!neighborhood || latitude == null) {
         const permitsRes = await getPermits(prop.parcelId)
         if (permitsRes.fromCache === false) hitApi = true
-        neighborhood = firstNonEmpty(permitsRes.data, 'neighborhood')
+        if (!neighborhood) neighborhood = firstNonEmpty(permitsRes.data, 'neighborhood')
+        if (latitude == null) {
+          const ll = firstLatLng(permitsRes.data)
+          if (ll) { latitude = ll.latitude; longitude = ll.longitude }
+        }
       }
 
-      if (!neighborhood && prop.address) {
+      if ((!neighborhood || latitude == null) && prop.address) {
         const coords = await geocodeAddress(prop.address)
         if (coords) {
           hitApi = true  // we called Census API
-          neighborhood = await neighborhoodAtPoint(coords.lat, coords.lng)
+          if (latitude == null) { latitude = coords.lat; longitude = coords.lng }
+          if (!neighborhood) {
+            neighborhood = await neighborhoodAtPoint(coords.lat, coords.lng)
+          }
         }
       }
 
       await setEnrichmentSummary(prop.caseNumber, {
-        neighborhood, ward, fairMarketValue, yearBuilt,
+        neighborhood, ward, fairMarketValue, yearBuilt, latitude, longitude,
         // Mark that we've tried — so the bulk-enrich button stops counting
         // this property as "unenriched" when there's simply no PLI data
         // available for it.
@@ -142,6 +152,19 @@ function firstNonEmpty(records, field) {
   for (const r of records) {
     const v = r?.[field]
     if (v && String(v).trim()) return String(v).trim()
+  }
+  return null
+}
+
+/** Extract the first {latitude, longitude} pair from a list of records. */
+function firstLatLng(records) {
+  if (!Array.isArray(records)) return null
+  for (const r of records) {
+    const lat = Number(r?.latitude)
+    const lng = Number(r?.longitude)
+    if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
+      return { latitude: lat, longitude: lng }
+    }
   }
   return null
 }

@@ -29,6 +29,7 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
   - Each property appears once under its most recent sale month (not under every month it appeared in — see the per-property history table for that)
 - Uploads archive collapses into a `<details>` element at the top to save screen space when you're working with hundreds of properties
 - **Download CSV** link on Home exports the current filtered + sorted view. ~30 columns including case #, address, opening bid, your notes/bids/flags, spread, neighborhood, Hilltop/condemned flags, plaintiff/defendant, validation issues. Opens cleanly in Excel/Sheets (UTF-8 BOM included so special characters render correctly). Filename includes the date and a compact filter summary, e.g. `sheriffs-sale-2026-06-12-active-hilltop.csv`.
+- **Map view** (`#/map`) plots every property with coordinates on a Pittsburgh-area Leaflet map (OpenStreetMap tiles, free). Markers are color-coded by status (Active red / Postponed amber / Stayed grey / Sold blue), condemned properties have a thicker dark-red outline. Click a marker for a popup with case #, address, opening bid, status, flags, and a link to the property detail page. Same filter chips as Home (status / flag / Hilltop only / condemned only) plus a toggleable Hilltop-neighborhood overlay. Properties without coordinates are listed in a "N missing" note — re-run bulk enrich on Home to backfill.
 - Click any property card on Home to open a per-property page with:
   - Full sale info (plaintiff, attorney, defendant, sale type, etc.)
   - Inline edit form for your max bid, ARV override, interested/skip flag, and notes — auto-saves on blur
@@ -241,7 +242,7 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   ├── main.js                   ← app entry point
 │   ├── router.js                 ← tiny hash-based router with error display
 │   ├── styles.css
-│   ├── views/                    ← one file per page (home, upload, settings, property)
+│   ├── views/                    ← one file per page (home, map, upload, settings, property)
 │   ├── storage/                  ← IndexedDB stores + per-store helpers
 │   ├── pdf/
 │   │   ├── parse.js              ← orchestrator: chunk → extract → validate → repair → upsert
