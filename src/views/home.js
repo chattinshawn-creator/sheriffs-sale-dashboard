@@ -5,6 +5,7 @@ import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
 import { enrichAllPittsburghProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
+import { propertiesToCsv, downloadCsv, exportFilename } from '../export/csv.js'
 import { formatMonth, formatBytes, formatDate, escapeHtml, escapeAttr } from '../ui/format.js'
 
 // In-memory filter/sort state. Survives navigation within the session but
@@ -97,7 +98,10 @@ function renderShell(uploads, properties) {
 
     <div class="row" style="margin:12px 0;justify-content:space-between;">
       <div id="property-count" class="muted small"></div>
-      <a href="#" id="clear-filters" class="small">Clear filters</a>
+      <div class="row" style="gap:16px;">
+        <a href="#" id="export-csv" class="small">Download CSV</a>
+        <a href="#" id="clear-filters" class="small">Clear filters</a>
+      </div>
     </div>
 
     <div id="property-list"></div>
@@ -341,6 +345,34 @@ function wireControls(el, properties) {
     // Full re-render to reset all the controls.
     renderHome(el)
   })
+
+  el.querySelector('#export-csv').addEventListener('click', (e) => {
+    e.preventDefault()
+    const sorted = applySort(applyFilters(properties))
+    const csv = propertiesToCsv(sorted)
+    const summary = currentFilterSummary()
+    downloadCsv(csv, exportFilename({ filterSummary: summary }))
+  })
+}
+
+/**
+ * Compact slug describing the active filter state, used in the export
+ * filename. Empty string when no filters are applied so the filename
+ * stays clean for "everything" exports.
+ */
+function currentFilterSummary() {
+  const parts = []
+  if (state.search) parts.push(state.search.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30))
+  if (state.statuses.size < STATUS_OPTIONS.length) {
+    parts.push([...state.statuses].sort().join('+'))
+  }
+  if (state.flags.size < FLAG_OPTIONS.length) {
+    parts.push('flag-' + [...state.flags].sort().join('+'))
+  }
+  if (state.needsReviewOnly) parts.push('needs-review')
+  if (state.hilltopOnly) parts.push('hilltop')
+  if (state.condemnedOnly) parts.push('condemned')
+  return parts.join('-').slice(0, 60)
 }
 
 // ─── Filter + sort + render the property list ──────────────────────────────

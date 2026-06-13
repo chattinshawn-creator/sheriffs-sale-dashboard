@@ -28,6 +28,7 @@ A personal web app for browsing and bidding on Allegheny County, PA Sheriff's Sa
   - "Showing N of M" counter and Clear filters link
   - Each property appears once under its most recent sale month (not under every month it appeared in — see the per-property history table for that)
 - Uploads archive collapses into a `<details>` element at the top to save screen space when you're working with hundreds of properties
+- **Download CSV** link on Home exports the current filtered + sorted view. ~30 columns including case #, address, opening bid, your notes/bids/flags, spread, neighborhood, Hilltop/condemned flags, plaintiff/defendant, validation issues. Opens cleanly in Excel/Sheets (UTF-8 BOM included so special characters render correctly). Filename includes the date and a compact filter summary, e.g. `sheriffs-sale-2026-06-12-active-hilltop.csv`.
 - Click any property card on Home to open a per-property page with:
   - Full sale info (plaintiff, attorney, defendant, sale type, etc.)
   - Inline edit form for your max bid, ARV override, interested/skip flag, and notes — auto-saves on blur
@@ -248,6 +249,8 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   │   ├── claude.js             ← Anthropic API wrapper (extract + repair calls)
 │   │   ├── prompts.js            ← system prompts + property schema
 │   │   └── validation.js         ← format + heuristic checks on parsed records
+│   ├── export/
+│   │   └── csv.js                ← CSV export of properties with all enrichment fields
 │   ├── enrichment/
 │   │   ├── normalize.js          ← Sheriff parcel ID → WPRDC PARID
 │   │   ├── wprdc.js              ← WPRDC CKAN API wrapper + dataset IDs
