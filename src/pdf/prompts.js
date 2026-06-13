@@ -54,15 +54,18 @@ disambiguate, not strict positional rules.
 - tracts: Integer. Usually 1. A value > 1 means multiple addresses on one case.
 - openingBid: The "Cost & Tax Bid" dollar amount, as a NUMBER (e.g. 56872.30),
   not a string. Strip "$" and commas.
-- serviceFlags: The service-of-notice column flags as shown ("XX", "X", "XXX", etc.).
-- serviceOk: boolean. The service column is a row of checkboxes with headers
-  like "Svs", "3129.2", "3129.3", "OK" (left to right). Set serviceOk to TRUE
-  only if the RIGHTMOST "OK" box is marked with an X (the property is cleared
-  and ready to go to sale). Set FALSE if the OK box is empty. If you genuinely
-  cannot tell, use null.
-- serviceCheckedCount: integer — how many of the service checkboxes in that row
-  are marked with an X. Use 0 if none are checked. This lets the app tell
-  "no progress" (0) from "in progress but not cleared" (>0, OK empty).
+- serviceFlags: (legacy) the service-of-notice text as shown ("XX", "X X", etc.).
+  Still capture it, but the structured serviceBoxes below is what the app uses.
+- serviceBoxes: the service-of-notice column is a row of LABELED checkboxes —
+  the headers are typically "Svs", "3129.2", "3129.3", "OK", left to right.
+  Return ONE entry per checkbox, in left-to-right order, recording whether each
+  individual box is marked with an X:
+    [{"label":"Svs","checked":true},{"label":"3129.2","checked":true},
+     {"label":"3129.3","checked":false},{"label":"OK","checked":true}]
+  Look at each box on its own and set "checked" true ONLY if that specific box
+  contains an X (an empty box is false). Use the header text you actually see as
+  each "label". The "OK" box being checked means the property is cleared and
+  ready to go to sale. Do not just tally X's — fill this array box by box.
 - plaintiff: Plaintiff name. Plaintiff type depends on sale type:
   - Tax-lien sales: a school district, borough, township, or
     sewer/water authority (e.g. "Munhall Borough", "Penn Hills School District")
@@ -155,8 +158,7 @@ Return ONLY a JSON object, no prose, no markdown fences. Shape:
       "tracts": 1,
       "openingBid": 56872.30,
       "serviceFlags": "XX",
-      "serviceOk": false,
-      "serviceCheckedCount": 2,
+      "serviceBoxes": [{"label":"Svs","checked":true},{"label":"3129.2","checked":true},{"label":"3129.3","checked":false},{"label":"OK","checked":false}],
       "plaintiff": "Liberty Borough",
       "plaintiffAttorney": "KRATZENBERG & LAZZARO",
       "defendant": "Rudberg Jr., Donald L",

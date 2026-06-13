@@ -7,14 +7,16 @@
  *                      read straight from the case-number prefix. Works on
  *                      existing data with no re-parse.
  *
- *   2. saleReadiness — How ready a property is to actually go to sale, read
+ *   2. saleReadiness — How ready a NOT-YET-SOLD property is to go to sale, read
  *                      from the service-of-notice checkboxes:
  *                        ready        — the "OK" box is checked (cleared to sell)
  *                        in_progress  — some boxes checked, but not OK yet
  *                        not_started  — zero boxes checked (unlikely to sell soon)
- *                        null         — unknown (e.g. data parsed before this
- *                                       field existed). Requires a re-parse.
+ *                        null         — unknown, OR the property has already
+ *                                       SOLD (in which case readiness is moot —
+ *                                       the UI shows SOLD instead).
  */
+import { statusBucketFor } from './outcome.js'
 
 // ── 1. Case category ─────────────────────────────────────────────────────────
 
@@ -54,14 +56,36 @@ export const READINESS_META = {
  */
 export function serviceStateForProperty(property) {
   for (const h of (property?.history || [])) {
-    if (h.serviceOk != null || typeof h.serviceCheckedCount === 'number') {
+    const boxes = Array.isArray(h.serviceBoxes) ? h.serviceBoxes : null
+    const hasBoxes = boxes && boxes.length > 0
+    if (hasBoxes || h.serviceOk != null || typeof h.serviceCheckedCount === 'number') {
+      const okFromBoxes = hasBoxes
+        ? (boxes.find(b => b && /\bok\b/i.test(String(b.label)))?.checked ?? null)
+        : null
       return {
-        serviceOk: h.serviceOk ?? null,
-        serviceCheckedCount: typeof h.serviceCheckedCount === 'number' ? h.serviceCheckedCount : null,
+        serviceOk: h.serviceOk ?? okFromBoxes ?? null,
+        serviceCheckedCount: typeof h.serviceCheckedCount === 'number'
+          ? h.serviceCheckedCount
+          : (hasBoxes ? boxes.filter(b => b && b.checked).length : null),
+        serviceBoxes: hasBoxes ? boxes : null,
       }
     }
   }
-  return { serviceOk: null, serviceCheckedCount: null }
+  return { serviceOk: null, serviceCheckedCount: null, serviceBoxes: null }
+}
+
+/**
+ * True if the property's CURRENT status (most recent history entry) is a sale
+ * outcome — i.e. it has gone to sale. Used to show SOLD instead of a readiness
+ * badge, and to suppress readiness once a property has sold.
+ *
+ * @param {object} property
+ * @returns {boolean}
+ */
+export function isSoldProperty(property) {
+  const h0 = property?.history?.[0]
+  if (!h0) return false
+  return statusBucketFor(h0.outcomeCategory, h0.status) === 'sold'
 }
 
 /**
@@ -69,6 +93,8 @@ export function serviceStateForProperty(property) {
  * @returns {'ready'|'in_progress'|'not_started'|null}
  */
 export function saleReadiness(property) {
+  // Once a property has actually sold, readiness is moot — the UI shows SOLD.
+  if (isSoldProperty(property)) return null
   const { serviceOk, serviceCheckedCount } = serviceStateForProperty(property)
   if (serviceOk === true) return 'ready'
   if (typeof serviceCheckedCount === 'number') {

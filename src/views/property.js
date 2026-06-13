@@ -7,6 +7,7 @@ import { validateProperty } from '../pdf/validation.js'
 import { isHilltopProperty } from '../enrichment/hilltop.js'
 import { getCondemnedInfo } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
+import { serviceStateForProperty, saleReadiness, READINESS_META } from '../pdf/classify.js'
 import { formatMonth, escapeHtml, escapeAttr } from '../ui/format.js'
 
 export async function renderProperty(el, params) {
@@ -69,6 +70,7 @@ function renderShell(prop, current, uploadsByHistory) {
     </div>
 
     ${renderValidationBanner(prop)}
+    ${renderPhotoCard(prop)}
     ${renderUserFieldsCard(prop)}
     ${renderSaleInfoCard(prop, current)}
     ${renderEnrichmentPlaceholder()}
@@ -102,6 +104,133 @@ function collectFlags(prop, current) {
     out.push(`<span class="tag">${postponements} postponements</span>`)
   }
   return out
+}
+
+// ─── Property image (aerial + photo links) ────────────────────────────────
+
+/**
+ * The county building photo, embedded inline. Allegheny County's iasWorld
+ * imaging service serves the assessor's photo publicly by parcel ID (the same
+ * image Parcels N'at shows), so we can hotlink it. If a parcel has no photo on
+ * file, we fall back to a free overhead aerial (Esri World Imagery, positioned
+ * from the enrichment lat/long). Below the image are one-click links to the
+ * full county record, Google Street View / Maps, and Parcels N'at.
+ *
+ * Real-estate listing photos (Zillow/Redfin) are copyrighted and can't be
+ * embedded, so those stay as links rather than hotlinked images.
+ */
+function renderPhotoCard(prop) {
+  const lat = prop.enrichmentSummary?.latitude
+  const lng = prop.enrichmentSummary?.longitude
+  const hasCoords = Number.isFinite(lat) && Number.isFinite(lng)
+  const addr = prop.address || ''
+  const parid = normalizeParcelId(prop.parcelId)
+
+  const photoUrl = parid ? countyPhotoUrl(parid) : ''
+  const aerialUrl = hasCoords ? aerialImageUrl(lat, lng) : ''
+
+  const links = []
+  if (parid) {
+    const short = parid.slice(0, 10).toLowerCase()
+    const county = `https://realestate.alleghenycounty.us/GeneralInfo?ID=${encodeURIComponent(parid)}&SearchType=3&SearchParcel=${encodeURIComponent(short)}`
+    links.push(photoLink(county, 'County record',
+      'Allegheny County real estate portal — full assessment, tax and sale history'))
+  }
+  const streetView = hasCoords
+    ? `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}`
+    : (addr ? `https://www.google.com/maps?layer=c&q=${encodeURIComponent(addr)}` : null)
+  if (streetView) links.push(photoLink(streetView, 'Street View',
+    'Google Street View — street-level photo of the property'))
+  const maps = hasCoords
+    ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`
+    : (addr ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}` : null)
+  if (maps) links.push(photoLink(maps, 'Google Maps', 'Open the location in Google Maps'))
+  if (parid) {
+    links.push(photoLink(`https://parcelsnat.org/explore?parcel=${encodeURIComponent(parid)}`,
+      "Parcels N'at", 'Open this parcel in WPRDC Parcels N’at'))
+  }
+
+  // Image block: prefer the county photo; on load error swap to the aerial;
+  // if that also fails (or neither is available), show a small notice.
+  let imageBlock
+  if (photoUrl || aerialUrl) {
+    const primaryUrl = photoUrl || aerialUrl
+    const primaryIsPhoto = !!photoUrl
+    const caption = primaryIsPhoto
+      ? 'County assessor photo. For a street-level view, use Street View below.'
+      : 'Overhead aerial — the property is at the red dot. For a street-level photo, use the links below.'
+    // onerror chain (state machine via data-state): photo → aerial → notice.
+    const onerror =
+      "if(this.dataset.state==='photo'&&this.dataset.aerial){" +
+        "this.dataset.state='aerial';this.src=this.dataset.aerial;" +
+        "var c=document.getElementById('prop-photo-caption');if(c)c.textContent='No county photo on file for this parcel — showing an overhead aerial (property at center).';" +
+        "var d=document.getElementById('prop-photo-dot');if(d)d.style.display='block';" +
+      "}else{" +
+        "this.style.display='none';" +
+        "var f=document.getElementById('prop-photo-fallback');if(f)f.style.display='block';" +
+      "}"
+    imageBlock = `
+      <div style="position:relative;max-width:600px;border-radius:8px;overflow:hidden;border:1px solid var(--color-border);">
+        <img id="prop-photo" src="${escapeAttr(primaryUrl)}"
+             data-state="${primaryIsPhoto ? 'photo' : 'aerial'}"
+             data-aerial="${escapeAttr(aerialUrl)}"
+             alt="Photo of ${escapeAttr(addr)}" loading="lazy"
+             style="display:block;width:100%;height:auto;background:#e5e7eb;min-height:120px;"
+             onerror="${escapeAttr(onerror)}" />
+        <div id="prop-photo-dot" style="display:${primaryIsPhoto ? 'none' : 'block'};position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;background:#dc2626;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,0.35);pointer-events:none;"></div>
+        <div id="prop-photo-fallback" class="banner warn small" style="display:none;margin:0;padding:10px;">No image available for this parcel — the photo links below still work.</div>
+      </div>
+      <p id="prop-photo-caption" class="muted small" style="margin:6px 0 0;">${caption}</p>
+    `
+  } else {
+    imageBlock = `
+      <div class="banner info small" style="margin:0;">
+        No parcel ID or map coordinates for this property yet, so there's no image to show.
+        Run <strong>Enrich properties</strong> on Home, or use the links below.
+      </div>
+    `
+  }
+
+  return `
+    <div class="card">
+      <h3 style="margin-top:0;">Property image</h3>
+      ${imageBlock}
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px;">
+        ${links.join('')}
+      </div>
+    </div>
+  `
+}
+
+/**
+ * Allegheny County iasWorld photo service — public, hotlinkable building photo
+ * by 16-char PARID. `jur=002` is the Allegheny County jurisdiction code.
+ */
+function countyPhotoUrl(parid) {
+  return `https://iasworld.alleghenycounty.us/iasworld/iDoc2/Services/GetPhoto.ashx?parid=${encodeURIComponent(parid)}&jur=002`
+}
+
+function photoLink(href, label, title) {
+  return `<a href="${escapeAttr(href)}" target="_blank" rel="noopener" title="${escapeAttr(title)}"
+    style="display:inline-block;padding:6px 12px;border:1px solid var(--color-border);border-radius:6px;text-decoration:none;font-size:13px;">${escapeHtml(label)} ↗</a>`
+}
+
+/**
+ * Esri World Imagery static export — returns an aerial JPEG for a bbox, no key.
+ * We size the bbox in real-world meters to match the image's 3:2 aspect so the
+ * aerial isn't stretched, centered on the property.
+ */
+function aerialImageUrl(lat, lng) {
+  const W = 600, H = 400
+  const latHalf = 0.00075 // ~83m half-height → ~165m tall view (house scale)
+  const metersPerDegLat = 111000
+  const metersPerDegLon = 111000 * Math.cos(lat * Math.PI / 180)
+  const groundH = latHalf * 2 * metersPerDegLat
+  const groundW = groundH * (W / H)
+  const lonHalf = (groundW / 2) / metersPerDegLon
+  const bbox = [lng - lonHalf, lat - latHalf, lng + lonHalf, lat + latHalf].join(',')
+  return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export` +
+    `?bbox=${bbox}&bboxSR=4326&imageSR=4326&size=${W},${H}&format=jpg&f=image`
 }
 
 // ─── Validation banner ─────────────────────────────────────────────────────
@@ -234,7 +363,7 @@ function renderSaleInfoCard(prop, current) {
       ${field('Plaintiff', prop.plaintiff)}
       ${field('Plaintiff attorney', prop.plaintiffAttorney)}
       ${field('Defendant', prop.defendant)}
-      ${field('Service flags', prop.serviceFlags)}
+      ${serviceField(prop)}
       ${field('Sale number', prop.saleNumber)}
     </div>
   `
@@ -245,6 +374,48 @@ function field(label, value) {
     <div class="row" style="padding:6px 0;border-bottom:1px solid var(--color-border);">
       <span class="muted small" style="min-width:160px;">${escapeHtml(label)}</span>
       <span>${value != null && value !== '' ? escapeHtml(String(value)) : '<span class="muted">—</span>'}</span>
+    </div>
+  `
+}
+
+const READINESS_BADGE_STYLE = {
+  ready:       'background:#d1fae5;color:#065f46;border-color:#a7f3d0;',
+  in_progress: 'background:#fef3c7;color:#b45309;border-color:#fde68a;',
+  not_started: 'background:#e5e7eb;color:#374151;border-color:#d1d5db;',
+}
+
+/**
+ * "Service of notice" row. Shows each checkbox (Svs / 3129.2 / 3129.3 / OK)
+ * with its checked state so it mirrors the PDF, plus the readiness conclusion.
+ * Falls back to the legacy raw flags for records parsed before per-box capture.
+ */
+function serviceField(prop) {
+  const { serviceBoxes, serviceCheckedCount } = serviceStateForProperty(prop)
+  const readyKey = saleReadiness(prop)
+  const readyBadge = readyKey
+    ? ` <span class="tag" style="${READINESS_BADGE_STYLE[readyKey]}" title="${escapeAttr(READINESS_META[readyKey].hint)}">${escapeHtml(READINESS_META[readyKey].label)}</span>`
+    : ''
+
+  let inner
+  if (serviceBoxes && serviceBoxes.length) {
+    const checked = serviceBoxes.filter(b => b.checked).length
+    const chips = serviceBoxes.map(b =>
+      `<span style="margin-right:12px;white-space:nowrap;">${escapeHtml(b.label)} ` +
+      `<strong style="color:${b.checked ? 'var(--color-ok)' : 'var(--color-muted)'}">${b.checked ? '✓' : '✗'}</strong></span>`
+    ).join('')
+    inner = `${chips}<span class="muted small">(${checked} of ${serviceBoxes.length} checked)</span>`
+  } else if (serviceCheckedCount != null) {
+    inner = `${serviceCheckedCount} box${serviceCheckedCount === 1 ? '' : 'es'} checked`
+  } else if (prop.serviceFlags) {
+    inner = `${escapeHtml(prop.serviceFlags)} <span class="muted small">(raw — re-parse the Sale List for per-box detail)</span>`
+  } else {
+    inner = '<span class="muted">—</span>'
+  }
+
+  return `
+    <div class="row" style="padding:6px 0;border-bottom:1px solid var(--color-border);">
+      <span class="muted small" style="min-width:160px;">Service of notice</span>
+      <span>${inner}${readyBadge}</span>
     </div>
   `
 }

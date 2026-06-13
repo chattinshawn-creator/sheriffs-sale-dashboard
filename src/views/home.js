@@ -2,7 +2,7 @@ import { listUploads } from '../storage/uploads.js'
 import { listProperties } from '../storage/properties.js'
 import { validateProperty } from '../pdf/validation.js'
 import { statusBucketFor } from '../pdf/outcome.js'
-import { caseCategory, saleReadiness, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
+import { caseCategory, saleReadiness, isSoldProperty, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
 import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
 import { enrichAllProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
@@ -617,6 +617,10 @@ function renderPropertyCard(prop, h) {
   }
   if (prop.tracts > 1) {
     flagsHtml.push(`<span class="tag">${prop.tracts} tracts</span>`)
+  }
+  if (isSoldProperty(prop)) {
+    const amt = h.soldFor != null ? ` $${h.soldFor.toLocaleString()}` : ''
+    flagsHtml.push(`<span class="tag" style="background:#dbeafe;color:#1e40af;border-color:#bfdbfe;font-weight:600;">SOLD${amt}</span>`)
   }
   const readyKey = saleReadiness(prop)
   if (readyKey) {

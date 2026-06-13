@@ -108,6 +108,34 @@ const PARSER_FIELDS = [
  * @param {object} parsed - one entry from the parser's output
  * @param {{uploadId: string, saleMonth: string}} ctx
  */
+/**
+ * Build the per-entry service-of-notice state from a parsed record.
+ * Prefers the structured `serviceBoxes` array (one {label, checked} per
+ * checkbox) and derives `serviceOk` (the "OK" box) and `serviceCheckedCount`
+ * from it so they can never disagree. Falls back to the older scalar fields
+ * when an older parse didn't produce boxes.
+ */
+function deriveServiceState(parsed) {
+  const boxes = Array.isArray(parsed.serviceBoxes)
+    ? parsed.serviceBoxes.filter(b => b && typeof b.label === 'string')
+    : null
+
+  if (boxes && boxes.length) {
+    const okBox = boxes.find(b => /\bok\b/i.test(b.label))
+    return {
+      serviceBoxes: boxes.map(b => ({ label: b.label, checked: !!b.checked })),
+      serviceOk: okBox ? !!okBox.checked : null,
+      serviceCheckedCount: boxes.filter(b => b.checked).length,
+    }
+  }
+
+  return {
+    serviceBoxes: null,
+    serviceOk: parsed.serviceOk ?? null,
+    serviceCheckedCount: typeof parsed.serviceCheckedCount === 'number' ? parsed.serviceCheckedCount : null,
+  }
+}
+
 export async function upsertProperty(parsed, { uploadId, saleMonth, uploadType, uploadedAt }) {
   if (!parsed.caseNumber) {
     throw new Error('upsertProperty: parsed record has no caseNumber')
@@ -142,9 +170,10 @@ export async function upsertProperty(parsed, { uploadId, saleMonth, uploadType, 
     soldFor,
     soldTo: parsed.soldTo ?? null,
     // Service-of-notice box state is per-sale (it lives on the listings sale),
-    // so it belongs on the history entry, not the top-level record.
-    serviceOk: parsed.serviceOk ?? null,
-    serviceCheckedCount: typeof parsed.serviceCheckedCount === 'number' ? parsed.serviceCheckedCount : null,
+    // so it belongs on the history entry, not the top-level record. Prefer the
+    // per-box array (accurate) and derive ok/count from it; fall back to the
+    // older scalar fields for back-compat.
+    ...deriveServiceState(parsed),
   }
 
   if (!existing) {

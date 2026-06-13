@@ -6,7 +6,7 @@ import { validateProperty } from '../pdf/validation.js'
 import { isHilltopProperty } from '../enrichment/hilltop.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
-import { caseCategory, saleReadiness, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
+import { caseCategory, saleReadiness, isSoldProperty, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
 import { escapeHtml, escapeAttr } from '../ui/format.js'
 
 // Map state — separate from Home filter state so they don't fight each other.
@@ -238,6 +238,10 @@ function popupHtml(p, status, condemned) {
   const tags = []
   if (condemned) tags.push('<span class="tag" style="background:#991b1b;color:white;">CONDEMNED</span>')
   if (isHilltopProperty(p)) tags.push('<span class="tag" style="background:#fed7aa;color:#9a3412;">Hilltop</span>')
+  if (isSoldProperty(p)) {
+    const amt = p.history[0]?.soldFor != null ? ` $${p.history[0].soldFor.toLocaleString()}` : ''
+    tags.push(`<span class="tag" style="background:#dbeafe;color:#1e40af;">SOLD${amt}</span>`)
+  }
   const readyKey = saleReadiness(p)
   if (readyKey) {
     const rs = { ready: 'background:#d1fae5;color:#065f46;', in_progress: 'background:#fef3c7;color:#b45309;', not_started: 'background:#e5e7eb;color:#374151;' }
