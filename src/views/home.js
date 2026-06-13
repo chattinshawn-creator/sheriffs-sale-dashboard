@@ -3,6 +3,8 @@ import { listProperties } from '../storage/properties.js'
 import { validateProperty } from '../pdf/validation.js'
 import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
 import { enrichAllPittsburghProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
+import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
+import { normalizeParcelId } from '../enrichment/normalize.js'
 import { formatMonth, formatBytes, formatDate, escapeHtml, escapeAttr } from '../ui/format.js'
 
 // In-memory filter/sort state. Survives navigation within the session but
@@ -15,6 +17,7 @@ const state = {
   flags: new Set(['interested', 'skip', 'unflagged']),
   needsReviewOnly: false,
   hilltopOnly: false,
+  condemnedOnly: false,
 }
 
 const STATUS_OPTIONS = [
@@ -39,9 +42,16 @@ const SORT_OPTIONS = [
 ]
 
 export async function renderHome(el) {
+  // Pre-load the condemned index so the synchronous lookups in card render
+  // have data to work with. Cached after first load — subsequent renders
+  // resolve immediately.
   const [uploads, properties] = await Promise.all([
     listUploads(),
     listProperties(),
+    loadCondemnedIndex().catch(err => {
+      console.warn('[home] condemned index failed to load:', err)
+      return null
+    }),
   ])
 
   if (uploads.length === 0) {
@@ -257,6 +267,11 @@ function renderFilterBar() {
           <input type="checkbox" id="hilltop-toggle" ${state.hilltopOnly ? 'checked' : ''} />
           Hilltop only
         </label>
+        <label class="small" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-left:16px;"
+               title="From the Pittsburgh PLI condemned/dead-end property list. Pittsburgh only.">
+          <input type="checkbox" id="condemned-toggle" ${state.condemnedOnly ? 'checked' : ''} />
+          Condemned only
+        </label>
       </div>
     </div>
   `
@@ -291,6 +306,11 @@ function wireControls(el, properties) {
 
   el.querySelector('#hilltop-toggle').addEventListener('change', (e) => {
     state.hilltopOnly = e.target.checked
+    renderPropertyList(el, properties)
+  })
+
+  el.querySelector('#condemned-toggle').addEventListener('change', (e) => {
+    state.condemnedOnly = e.target.checked
     renderPropertyList(el, properties)
   })
 
@@ -392,8 +412,18 @@ function applyFilters(properties) {
     // Hilltop filter
     if (state.hilltopOnly && !isHilltopProperty(p)) return false
 
+    // Condemned filter
+    if (state.condemnedOnly && !lookupCondemned(p)) return false
+
     return true
   })
+}
+
+/** Synchronous condemned lookup against the in-memory index. */
+function lookupCondemned(prop) {
+  const parid = normalizeParcelId(prop.parcelId)
+  if (!parid) return null
+  return getCondemnedInfoSync(parid)
 }
 
 function applySort(properties) {
@@ -470,7 +500,12 @@ function renderPropertyCard(prop, h) {
     : ''
 
   const liveValidation = validateProperty(prop)
+  const condemned = lookupCondemned(prop)
   const flagsHtml = []
+  if (condemned) {
+    const tip = `Condemned/Dead End — ${condemned.inspectionStatus || '?'} • last inspection ${condemned.createDate || '?'}: ${condemned.latestInspectionResult || 'no result'}`
+    flagsHtml.push(`<span class="tag" style="background:#991b1b;color:white;border-color:#7f1d1d;font-weight:600;" title="${escapeAttr(tip)}">CONDEMNED</span>`)
+  }
   if (!liveValidation.ok) {
     flagsHtml.push(`<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;" title="${escapeHtml(liveValidation.issues.join('; '))}">needs review</span>`)
   }

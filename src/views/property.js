@@ -5,6 +5,8 @@ import { getViolations } from '../enrichment/violations.js'
 import { getPermits } from '../enrichment/permits.js'
 import { validateProperty } from '../pdf/validation.js'
 import { isHilltopProperty } from '../enrichment/hilltop.js'
+import { getCondemnedInfo } from '../enrichment/condemned.js'
+import { normalizeParcelId } from '../enrichment/normalize.js'
 import { formatMonth, escapeHtml, escapeAttr } from '../ui/format.js'
 
 export async function renderProperty(el, params) {
@@ -39,6 +41,7 @@ export async function renderProperty(el, params) {
   wireSourcePdfLinks(el)
   loadEnrichment(el, prop, current)
   loadPittsburghData(el, prop)
+  loadCondemnedStatus(el, prop)
 }
 
 // ─── Top-level shell ───────────────────────────────────────────────────────
@@ -78,6 +81,9 @@ function renderShell(prop, current, uploadsByHistory) {
 
 function collectFlags(prop, current) {
   const out = []
+  // Placeholder slot for the CONDEMNED tag — populated async after the
+  // condemned index loads. See loadCondemnedStatus below.
+  out.push(`<span id="condemned-slot"></span>`)
   if (isHilltopProperty(prop)) {
     const nh = prop.enrichmentSummary?.neighborhood || 'Hilltop'
     out.push(`<span class="tag" style="background:#fed7aa;color:#9a3412;border-color:#fdba74;" title="${escapeAttr(nh)}">Hilltop</span>`)
@@ -577,6 +583,68 @@ function formatSale(date, price) {
   if (m && date) return `${m} on ${escapeHtml(date)}`
   if (m) return m
   return escapeHtml(date)
+}
+
+// ─── Condemned / Dead End status ───────────────────────────────────────────
+
+async function loadCondemnedStatus(el, prop) {
+  const parid = normalizeParcelId(prop.parcelId)
+  if (!parid) return
+  let info
+  try {
+    info = await getCondemnedInfo(parid)
+  } catch (e) {
+    console.warn('[property] condemned lookup failed:', e)
+    return
+  }
+  if (!info) return
+
+  // Pop the CONDEMNED tag into the header flags row.
+  const slot = el.querySelector('#condemned-slot')
+  if (slot) {
+    const tip = `Condemned/Dead End — ${info.inspectionStatus || '?'} • last inspection ${info.createDate || '?'}: ${info.latestInspectionResult || 'no result'}`
+    slot.outerHTML = `<span class="tag" style="background:#991b1b;color:white;border-color:#7f1d1d;font-weight:600;" title="${escapeAttr(tip)}">CONDEMNED</span>`
+  }
+
+  // Inject a dedicated condemnation card above the Pittsburgh data card.
+  const pghZone = el.querySelector('#pgh-zone')
+  const card = document.createElement('div')
+  card.className = 'card'
+  card.id = 'condemned-zone'
+  card.style.borderColor = '#991b1b'
+  card.style.borderWidth = '2px'
+  card.innerHTML = renderCondemnedCard(info)
+  if (pghZone) pghZone.parentNode.insertBefore(card, pghZone)
+}
+
+function renderCondemnedCard(info) {
+  const ins = info.allInspections || []
+  const insList = ins.length > 1 ? `
+    <details style="margin-top:8px;">
+      <summary class="small muted" style="cursor:pointer;">${ins.length} inspection records on file</summary>
+      <ul style="padding-left:18px;margin:6px 0;font-size:13px;">
+        ${ins.map(r => `
+          <li><span class="muted">${escapeHtml(r.create_date || '?')}</span> — ${escapeHtml(r.latest_inspection_result || 'no result')}${r.latest_inspection_score ? ` (score ${escapeHtml(r.latest_inspection_score)})` : ''}</li>
+        `).join('')}
+      </ul>
+    </details>
+  ` : ''
+  return `
+    <h3 style="margin-top:0;color:#991b1b;">⚠ Condemned / Dead End Property</h3>
+    <div class="banner err" style="margin-bottom:12px;">
+      This parcel is on the City of Pittsburgh PLI condemned / dead-end property list.
+      It may not be habitable, may be subject to a demolition order, and is likely
+      to carry substantial repair burdens beyond what shows on the Sheriff PDF.
+    </div>
+    ${field('Property type', info.propertyType)}
+    ${field('Inspection status', info.inspectionStatus)}
+    ${field('Latest inspection', info.createDate ? `${info.createDate} — ${info.latestInspectionResult || 'no result'}${info.latestInspectionScore ? ` (score ${info.latestInspectionScore})` : ''}` : null)}
+    ${field('Owner of record (per PLI)', info.owner)}
+    ${field('Neighborhood (per PLI)', info.neighborhood)}
+    ${field('Council district', info.council)}
+    ${field('Ward', info.ward)}
+    ${insList}
+  `
 }
 
 function formatRelative(ts) {

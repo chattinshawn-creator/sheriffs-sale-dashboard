@@ -189,9 +189,20 @@ Neighborhood data is resolved in four tiers, in order:
 
 The bulk enrich runs all four tiers as needed and stores the resulting neighborhood + ward on each property's `enrichmentSummary`. Throttled at 200ms per uncached API call to be polite to free public services. Re-running is cheap: cached lookups skip the API.
 
+### Condemned / Dead End property list
+
+The City of Pittsburgh PLI department publishes a list of condemned and "dead end" properties (parcels PLI has been unable to bring into compliance). The list isn't on WPRDC's CKAN API but is available as a GeoJSON; a copy is bundled at `public/condemned_dead_end.geojson` (3.3 MB, ~700 KB gzipped over the wire).
+
+When you load Home, the file is fetched once and indexed in memory by `parcel_id`. Any Sheriff property whose parcel ID is in that index gets:
+
+- A red **CONDEMNED** badge on its card on Home
+- A dedicated red-bordered "⚠ Condemned / Dead End Property" card at the top of its per-property page, showing inspection status + latest inspection result + date + owner-of-record + all historical inspection records
+- A **"Condemned only"** filter toggle in the filter bar for fast triage
+
+Coverage: Pittsburgh only (PLI's jurisdiction). Properties outside Pittsburgh are never in this list — they just don't get the badge, which is correct.
+
 ### What's NOT enriched (and why)
 
-- **Condemned/unfit property list** — not published as a clean dataset on WPRDC. The city tracks this internally but doesn't expose it for download.
 - **Municipal liens at parcel level** — WPRDC only publishes lien data aggregated at the census-tract level, not per-property. For a specific property's lien status you'd still need to check with the City Treasurer directly.
 
 ## Storage
@@ -245,6 +256,7 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   │   ├── permits.js            ← PLI permits (Pittsburgh only)
 │   │   ├── geocode.js            ← US Census Geocoder wrapper (address → lat/lng)
 │   │   ├── neighborhoods.js      ← point-in-polygon against neighborhoods.geojson
+│   │   ├── condemned.js          ← PLI condemned/dead-end property lookup
 │   │   ├── hilltop.js            ← Hilltop neighborhood list + matcher
 │   │   └── bulk.js               ← bulk enrich all Pittsburgh properties
 │   └── ui/                       ← shared bits (nav, formatters)
