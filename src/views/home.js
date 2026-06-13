@@ -110,37 +110,37 @@ function renderShell(uploads, properties) {
 
 // ─── Bulk enrichment bar (only shown when there's work to do) ──────────────
 
+function isEnriched(p) {
+  // "Enriched" means we've attempted it AND have usable coordinates (so it
+  // can appear on the map). Pure-numeric neighborhood values are the old
+  // assessor-code bug and don't count.
+  const s = p.enrichmentSummary || {}
+  if (!s.attemptedAt) return false
+  if (s.latitude == null || s.longitude == null) return false
+  if (s.neighborhood && /^\d+$/.test(String(s.neighborhood).trim())) return false
+  return true
+}
+
 function renderBulkEnrichBar(properties) {
-  const pittsburgh = properties.filter(p => p.isPittsburghProper)
-  if (pittsburgh.length === 0) return ''
-  // "Enriched" means: we've attempted enrichment (got SOMETHING back), even
-  // if there were no PLI records to give us a neighborhood. Properties where
-  // we've attempted but found no neighborhood get the ward-based Hilltop
-  // fallback — they don't need re-enrichment.
-  // Also treat pure-numeric stored values as un-enriched (old bug stored
-  // assessor codes like "13001" — those aren't real neighborhood names).
-  const enriched = pittsburgh.filter(p => {
-    const s = p.enrichmentSummary || {}
-    if (!s.attemptedAt) return false
-    if (s.neighborhood && /^\d+$/.test(String(s.neighborhood).trim())) return false
-    return true
-  }).length
-  const remaining = pittsburgh.length - enriched
+  const targets = properties.filter(p => p.parcelId || p.address)
+  if (targets.length === 0) return ''
+  const enriched = targets.filter(isEnriched).length
+  const remaining = targets.length - enriched
   if (remaining === 0) {
     return `
       <div class="small muted" style="margin-top:8px;">
-        All ${pittsburgh.length} Pittsburgh properties enriched. <a href="#" id="bulk-enrich-btn">Re-run anyway</a>
+        All ${targets.length} properties enriched. <a href="#" id="bulk-enrich-btn">Re-run anyway</a>
       </div>
     `
   }
   const minutes = Math.max(1, Math.ceil((remaining * 0.4) / 60))
   return `
     <div class="card" id="bulk-enrich-card" style="margin-top:12px;background:#fff7ed;border-color:#fed7aa;">
-      <strong>Enrich Pittsburgh properties for neighborhood + Hilltop tagging</strong>
+      <strong>Enrich properties for map coordinates, neighborhood + Hilltop tagging</strong>
       <p class="small" style="margin:4px 0;">
-        ${remaining} of ${pittsburgh.length} Pittsburgh properties haven't been enriched yet.
-        Fetches assessor data (neighborhood, year built, fair-market value) from WPRDC.
-        Free, takes ~${minutes} minute${minutes === 1 ? '' : 's'}.
+        ${remaining} of ${targets.length} properties haven't been enriched yet.
+        Fetches assessor data (fair-market value, year built) countywide, plus
+        neighborhood + condemnation data and map coordinates. Free, takes ~${minutes} minute${minutes === 1 ? '' : 's'}.
       </p>
       <button class="primary" id="bulk-enrich-btn">Enrich ${remaining} properties</button>
     </div>
@@ -152,7 +152,7 @@ async function runBulkEnrich(el, properties) {
   if (!card) return
 
   card.innerHTML = `
-    <strong>Enriching Pittsburgh properties…</strong>
+    <strong>Enriching properties…</strong>
     <div id="bulk-status" class="small" style="margin:6px 0;">Starting…</div>
     <div class="progress" style="margin:6px 0;"><div id="bulk-bar" style="width:0%"></div></div>
     <button id="bulk-cancel">Cancel</button>
@@ -165,7 +165,7 @@ async function runBulkEnrich(el, properties) {
   const statusEl = el.querySelector('#bulk-status')
   const barEl = el.querySelector('#bulk-bar')
 
-  await enrichAllPittsburghProperties((info) => {
+  await enrichAllProperties((info) => {
     const pct = info.total > 0 ? Math.round((info.processed / info.total) * 100) : 0
     barEl.style.width = `${pct}%`
     if (info.status === 'running') {
