@@ -48,7 +48,16 @@ export async function fetchAllByFilter(resourceId, filterObj, opts = {}) {
   const filters = encodeURIComponent(JSON.stringify(filterObj))
   const url = `${API_BASE}/datastore_search?resource_id=${resourceId}&filters=${filters}&limit=${limit}`
 
-  const res = await fetch(url)
+  // Abort if WPRDC stalls — without this, one slow request would hang the
+  // whole bulk-enrich loop indefinitely.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 12000)
+  let res
+  try {
+    res = await fetch(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
   if (!res.ok) {
     throw new Error(`WPRDC API ${res.status} ${res.statusText}`)
   }

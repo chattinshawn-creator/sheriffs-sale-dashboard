@@ -2,7 +2,7 @@ import { listUploads } from '../storage/uploads.js'
 import { listProperties } from '../storage/properties.js'
 import { validateProperty } from '../pdf/validation.js'
 import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
-import { enrichAllPittsburghProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
+import { enrichAllProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
 import { propertiesToCsv, downloadCsv, exportFilename } from '../export/csv.js'
@@ -165,24 +165,31 @@ async function runBulkEnrich(el, properties) {
   const statusEl = el.querySelector('#bulk-status')
   const barEl = el.querySelector('#bulk-bar')
 
-  await enrichAllProperties((info) => {
-    const pct = info.total > 0 ? Math.round((info.processed / info.total) * 100) : 0
-    barEl.style.width = `${pct}%`
-    if (info.status === 'running') {
-      const addr = info.currentAddress ? escapeHtml(info.currentAddress.slice(0, 60)) : ''
-      const nh = info.neighborhood ? ` — <em>${escapeHtml(info.neighborhood)}</em>` : ''
-      statusEl.innerHTML =
-        `Enriched ${info.processed} of ${info.total} • ` +
-        `${info.hilltopSoFar} Hilltop so far${info.errors > 0 ? ` • ${info.errors} errors` : ''}<br>` +
-        `<span class="muted">${addr}${nh}</span>`
-    } else if (info.status === 'cancelled') {
-      statusEl.innerHTML = `<strong>Cancelled</strong> after ${info.processed} of ${info.total} properties. Click the button again later to resume.`
-    } else if (info.status === 'done') {
-      statusEl.innerHTML =
-        `<strong>Done.</strong> Enriched ${info.processed} properties • ` +
-        `${info.hilltopSoFar} flagged as Hilltop${info.errors > 0 ? ` • ${info.errors} errors` : ''}.`
-    }
-  })
+  try {
+    await enrichAllProperties((info) => {
+      const pct = info.total > 0 ? Math.round((info.processed / info.total) * 100) : 0
+      barEl.style.width = `${pct}%`
+      if (info.status === 'running') {
+        const addr = info.currentAddress ? escapeHtml(info.currentAddress.slice(0, 60)) : ''
+        const nh = info.neighborhood ? ` — <em>${escapeHtml(info.neighborhood)}</em>` : ''
+        statusEl.innerHTML =
+          `Enriching ${info.processed + 1} of ${info.total} • ` +
+          `${info.hilltopSoFar} Hilltop so far${info.errors > 0 ? ` • ${info.errors} errors` : ''}<br>` +
+          `<span class="muted">${addr}${nh}</span>`
+      } else if (info.status === 'cancelled') {
+        statusEl.innerHTML = `<strong>Cancelled</strong> after ${info.processed} of ${info.total} properties. Click the button again later to resume.`
+      } else if (info.status === 'done') {
+        statusEl.innerHTML =
+          `<strong>Done.</strong> Enriched ${info.processed} properties • ` +
+          `${info.hilltopSoFar} flagged as Hilltop${info.errors > 0 ? ` • ${info.errors} errors` : ''}.`
+      }
+    })
+  } catch (e) {
+    // Surface the error instead of freezing on "Starting…".
+    console.error('[bulk] enrichment crashed:', e)
+    statusEl.innerHTML = `<span style="color:var(--color-err);"><strong>Enrichment failed:</strong> ${escapeHtml(String(e?.message || e))}</span>`
+    return
+  }
 
   // Re-render the home view so the new neighborhood data shows up everywhere.
   setTimeout(() => renderHome(el), 1500)

@@ -190,8 +190,10 @@ function wireUserFieldsAutoSave(el, prop) {
     })
   })
 
-  // Max bid — save on blur
-  el.querySelector('#max-bid').addEventListener('blur', async (e) => {
+  // Max bid — recompute spread live while typing, save on blur.
+  const maxBidEl = el.querySelector('#max-bid')
+  maxBidEl.addEventListener('input', () => recomputeSpread(el))
+  maxBidEl.addEventListener('blur', async (e) => {
     const v = e.target.value.trim()
     const num = v === '' ? null : Number(v)
     if (v !== '' && !Number.isFinite(num)) return
@@ -199,8 +201,10 @@ function wireUserFieldsAutoSave(el, prop) {
     flash('#max-bid-saved')
   })
 
-  // ARV — save on blur
-  el.querySelector('#arv-override').addEventListener('blur', async (e) => {
+  // ARV — recompute spread live while typing, save on blur.
+  const arvEl = el.querySelector('#arv-override')
+  arvEl.addEventListener('input', () => recomputeSpread(el))
+  arvEl.addEventListener('blur', async (e) => {
     const v = e.target.value.trim()
     const num = v === '' ? null : Number(v)
     if (v !== '' && !Number.isFinite(num)) return
@@ -520,10 +524,23 @@ function renderSpread(prop, current, assessorData) {
   const openingBid = current.openingBid ?? null
   const userMaxBid = prop.userFields?.maxBid ?? null
   const userArvOverride = prop.userFields?.arvOverride ?? null
+  // Wrap in a stable container + stash the fixed inputs (opening bid, FMV) as
+  // data attributes so the live recompute can read them without re-fetching.
+  return `<div id="spread-section"
+    data-opening-bid="${openingBid != null ? openingBid : ''}"
+    data-fair-market="${fairMarket != null ? fairMarket : ''}">
+    ${spreadInnerHtml(openingBid, fairMarket, userArvOverride, userMaxBid)}
+  </div>`
+}
 
+/**
+ * Pure render of the spread numbers from explicit values. Called both on
+ * initial render and on every live recompute as the user edits max bid / ARV.
+ */
+function spreadInnerHtml(openingBid, fairMarket, arvOverride, maxBid) {
   // ARV = user's override if set, else WPRDC fair market value.
-  const arv = userArvOverride ?? fairMarket
-  const arvSource = userArvOverride != null ? 'your override' : 'WPRDC fair-market value'
+  const arv = arvOverride ?? fairMarket
+  const arvSource = arvOverride != null ? 'your override' : 'WPRDC fair-market value'
 
   if (arv == null || openingBid == null) {
     return `
@@ -533,7 +550,7 @@ function renderSpread(prop, current, assessorData) {
   }
 
   const spreadOpen = arv - openingBid
-  const marginIfWon = userMaxBid != null ? arv - userMaxBid : null
+  const marginIfWon = maxBid != null ? arv - maxBid : null
 
   return `
     <h4 class="muted small" style="margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.04em;">Spread analysis</h4>
@@ -544,13 +561,34 @@ function renderSpread(prop, current, assessorData) {
         ${kv('Spread at opening', signedMoneyHtml(spreadOpen))}
       </div>
       <div style="flex:1;min-width:200px;">
-        ${kv('Your max bid', userMaxBid != null ? money(userMaxBid) : '<span class="muted">not set</span>')}
+        ${kv('Your max bid', maxBid != null ? money(maxBid) : '<span class="muted">not set</span>')}
         ${marginIfWon != null
           ? kv('Margin if won at max', signedMoneyHtml(marginIfWon))
           : kv('Margin if won at max', '<span class="muted">set a max bid above</span>')}
       </div>
     </div>
   `
+}
+
+/**
+ * Recompute and re-render just the spread section using the CURRENT values
+ * typed into the max-bid / ARV inputs. Safe to call before the enrichment
+ * card has loaded (the section won't exist yet — we just no-op).
+ */
+function recomputeSpread(el) {
+  const section = el.querySelector('#spread-section')
+  if (!section) return
+  const openingBid = numOrNull(section.dataset.openingBid)
+  const fairMarket = numOrNull(section.dataset.fairMarket)
+  const arvOverride = numOrNull(el.querySelector('#arv-override')?.value)
+  const maxBid = numOrNull(el.querySelector('#max-bid')?.value)
+  section.innerHTML = spreadInnerHtml(openingBid, fairMarket, arvOverride, maxBid)
+}
+
+function numOrNull(v) {
+  if (v == null || String(v).trim() === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
 }
 
 // ─── Small formatting helpers used by the enrichment card ─────────────────

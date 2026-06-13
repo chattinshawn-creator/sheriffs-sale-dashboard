@@ -2,8 +2,8 @@ import { listProperties, setEnrichmentSummary } from '../storage/properties.js'
 import { getAssessor } from './assessor.js'
 import { getViolations } from './violations.js'
 import { getPermits } from './permits.js'
-import { geocodeAddress } from './geocode.js'
-import { neighborhoodAtPoint } from './neighborhoods.js'
+import { getParcelCentroid } from './centroid.js'
+import { geocodeViaOsm } from './geocodeOsm.js'
 
 /**
  * Throttle delay between WPRDC API calls. 200ms = 5 req/sec, polite to a
@@ -53,6 +53,17 @@ export async function enrichAllProperties(onProgress = () => {}, opts = {}) {
   for (const prop of targets) {
     if (cancelFlag) break
 
+    // Report which property we're STARTING on, so the UI shows live movement
+    // even while this property's (possibly slow) network calls are in flight.
+    onProgress({
+      processed, total,
+      currentAddress: prop.address,
+      neighborhood: null,
+      hilltopSoFar: hilltopFound,
+      errors,
+      status: 'running',
+    })
+
     let neighborhood = null
     let ward = null
     let fairMarketValue = null
@@ -60,6 +71,7 @@ export async function enrichAllProperties(onProgress = () => {}, opts = {}) {
     let latitude = null
     let longitude = null
     let hitApi = false
+    let hitOsm = false  // Nominatim needs a longer (1s) throttle than WPRDC
 
     try {
       // Assessor works countywide: year built + fair market + ward.
@@ -74,36 +86,43 @@ export async function enrichAllProperties(onProgress = () => {}, opts = {}) {
         }
       }
 
-      // PLI violations/permits are Pittsburgh-only — only query them for
-      // Pittsburgh properties (they'd return empty for everyone else).
-      if (prop.isPittsburghProper && prop.parcelId) {
-        const violationsRes = await getViolations(prop.parcelId)
-        if (violationsRes.fromCache === false) hitApi = true
-        neighborhood = firstNonEmpty(violationsRes.data, 'neighborhood')
-        ;({ latitude, longitude } = firstLatLng(violationsRes.data) || { latitude: null, longitude: null })
-
-        if (!neighborhood || latitude == null) {
-          const permitsRes = await getPermits(prop.parcelId)
-          if (permitsRes.fromCache === false) hitApi = true
-          if (!neighborhood) neighborhood = firstNonEmpty(permitsRes.data, 'neighborhood')
-          if (latitude == null) {
-            const ll = firstLatLng(permitsRes.data)
-            if (ll) { latitude = ll.latitude; longitude = ll.longitude }
-          }
+      // PRIMARY source for coordinates + neighborhood: the WPRDC parcel
+      // centroids dataset, keyed by PIN (= our parcel ID). Covers the whole
+      // county and is CORS-friendly (the Census geocoder is not). Centroid =
+      // actual parcel location, more accurate than street-interpolated geocoding.
+      if (prop.parcelId) {
+        const cen = await getParcelCentroid(prop.parcelId)
+        if (cen.fromCache === false) hitApi = true
+        if (cen.status === 'ok') {
+          latitude = cen.lat
+          longitude = cen.lng
+          if (cen.cityNeighborhood) neighborhood = cen.cityNeighborhood
         }
       }
 
-      // Geocode fallback (countywide): fills missing coords for everyone,
-      // and the neighborhood polygon for Pittsburgh parcels with no PLI data.
+      // Pittsburgh fallback: if the centroid didn't carry a neighborhood
+      // name, pull it from PLI violations/permits (which have a readable
+      // `neighborhood` column).
+      if (!neighborhood && prop.isPittsburghProper && prop.parcelId) {
+        const violationsRes = await getViolations(prop.parcelId)
+        if (violationsRes.fromCache === false) hitApi = true
+        neighborhood = firstNonEmpty(violationsRes.data, 'neighborhood')
+        if (!neighborhood) {
+          const permitsRes = await getPermits(prop.parcelId)
+          if (permitsRes.fromCache === false) hitApi = true
+          neighborhood = firstNonEmpty(permitsRes.data, 'neighborhood')
+        }
+      }
+
+      // Coordinate fallback: parcels missing from the centroid dataset
+      // (mostly condo units) get geocoded via Nominatim, using the real
+      // MUNICIPALITY rather than the mailing city.
       if (latitude == null && prop.address) {
-        const coords = await geocodeAddress(prop.address)
-        if (coords) {
-          hitApi = true  // we called Census API
+        const coords = await geocodeViaOsm(prop.address, prop.municipality)
+        hitOsm = true
+        if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
           latitude = coords.lat
           longitude = coords.lng
-          if (!neighborhood && prop.isPittsburghProper) {
-            neighborhood = await neighborhoodAtPoint(coords.lat, coords.lng)
-          }
         }
       }
 
@@ -128,8 +147,10 @@ export async function enrichAllProperties(onProgress = () => {}, opts = {}) {
       status: 'running',
     })
 
-    if (hitApi && processed < total) {
-      await new Promise(r => setTimeout(r, THROTTLE_MS))
+    // Nominatim's usage policy wants ≤1 req/sec; WPRDC is fine at 5/sec.
+    if (processed < total) {
+      if (hitOsm) await new Promise(r => setTimeout(r, 1100))
+      else if (hitApi) await new Promise(r => setTimeout(r, THROTTLE_MS))
     }
   }
 

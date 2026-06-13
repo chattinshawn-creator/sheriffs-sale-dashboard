@@ -182,14 +182,17 @@ Properties in any of the Pittsburgh Hilltop neighborhoods get an orange "Hilltop
 
 **Tagged neighborhoods:** Allentown, Arlington, Beltzhoover, Bon Air, Carrick, Knoxville, Mt. Oliver Neighborhood, St. Clair, Hays, Lincoln Place, South Side Slopes, Mt. Washington, Duquesne Heights.
 
-Neighborhood data is resolved in four tiers, in order:
+Coordinates and neighborhood both come from the **WPRDC Parcel Centroids** dataset (resource `3fab7152…`), keyed by `PIN` (= the normalized parcel ID). It covers all ~585k county parcels, carries exact centroid `LAT`/`LONG` for the map, and includes `CITY_NEIGHBORHOOD` for Pittsburgh parcels. Crucially it's served by WPRDC's CKAN API, which sends CORS headers — unlike the US Census geocoder, which is CORS-blocked from the browser and was abandoned for this reason.
 
-1. **PLI violations** — the WPRDC PLI violations dataset has a human-readable `neighborhood` field. Most Pittsburgh parcels have at least one violation record.
-2. **PLI permits** — same `neighborhood` field on the permits dataset; fallback when violations is empty.
-3. **Geocode + point-in-polygon** — for parcels with no PLI history, we geocode the address via the US Census Geocoder (free, no API key) and look up which neighborhood polygon contains the resulting lat/lng. The polygon data comes from `public/neighborhoods.geojson` (Pittsburgh Department of City Planning, ~1.2 MB, loaded lazily on first need).
-4. **Ward-based fallback** — if all of the above fail, the Hilltop badge can still fire based on the assessor's ward (parsed from MUNIDESC). Hilltop wards (Shawn-confirmed): 16, 17, 18, 29, 30, 32.
+Neighborhood resolution, in order:
 
-The bulk enrich runs all four tiers as needed and stores the resulting neighborhood + ward on each property's `enrichmentSummary`. Throttled at 200ms per uncached API call to be polite to free public services. Re-running is cheap: cached lookups skip the API.
+1. **Parcel centroid `CITY_NEIGHBORHOOD`** — primary, present for Pittsburgh parcels.
+2. **PLI violations / permits `neighborhood`** — Pittsburgh fallback when the centroid carries no neighborhood.
+3. **Ward-based fallback** — if neither gives a name, the Hilltop badge can still fire from the assessor's ward (parsed from MUNIDESC). Hilltop wards (Shawn-confirmed): 16, 17, 18, 29, 30, 32.
+
+The bulk enrich stores `latitude`, `longitude`, `neighborhood`, `ward`, `fairMarketValue`, and `yearBuilt` on each property's `enrichmentSummary`. Throttled at 200ms per uncached API call. Re-running is cheap: cached lookups skip the API.
+
+(`src/enrichment/geocode.js` and `neighborhoods.js` remain in the tree from the earlier Census-geocoder approach but are no longer used by the bulk enrich.)
 
 ### Condemned / Dead End property list
 

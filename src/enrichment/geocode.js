@@ -30,7 +30,16 @@ export async function geocodeAddress(rawAddress) {
   })
   let coords = null
   try {
-    const res = await fetch(`${ENDPOINT}?${params}`)
+    // Abort if the Census Geocoder stalls — without this, one slow request
+    // would hang the whole bulk-enrich loop indefinitely.
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 12000)
+    let res
+    try {
+      res = await fetch(`${ENDPOINT}?${params}`, { signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+    }
     if (res.ok) {
       const data = await res.json()
       const match = data?.result?.addressMatches?.[0]
@@ -39,7 +48,8 @@ export async function geocodeAddress(rawAddress) {
       }
     }
   } catch (e) {
-    console.warn('[geocode] failed for', rawAddress, e)
+    // Timeout (AbortError) or network error — treat as "no match" and move on.
+    console.warn('[geocode] failed for', rawAddress, e?.name || e)
   }
 
   await set(key, { data: coords, fetchedAt: Date.now() }, stores.geoDataCache)
