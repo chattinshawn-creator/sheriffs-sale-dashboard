@@ -6,16 +6,29 @@ import { validateProperty } from '../pdf/validation.js'
 import { isHilltopProperty } from '../enrichment/hilltop.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
+import { caseCategory, saleReadiness, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
 import { escapeHtml, escapeAttr } from '../ui/format.js'
 
 // Map state — separate from Home filter state so they don't fight each other.
 const state = {
   statuses: new Set(['active', 'postponed', 'stayed', 'sold']),
   flags: new Set(['interested', 'skip', 'unflagged']),
+  caseTypes: new Set(['mortgage', 'tax_other']),
+  readiness: new Set(['ready', 'in_progress', 'not_started']),
   hilltopOnly: false,
   condemnedOnly: false,
   showHilltopOverlay: false,
 }
+
+const CASE_OPTIONS = [
+  { key: 'mortgage',  label: CASE_CATEGORY_META.mortgage.label },
+  { key: 'tax_other', label: CASE_CATEGORY_META.tax_other.label },
+]
+const READINESS_OPTIONS = [
+  { key: 'ready',       label: READINESS_META.ready.label },
+  { key: 'in_progress', label: READINESS_META.in_progress.label },
+  { key: 'not_started', label: READINESS_META.not_started.label },
+]
 
 const STATUS_OPTIONS = [
   { key: 'active',    label: 'Active' },
@@ -65,6 +78,10 @@ function renderShell(properties) {
     chip('status', o.key, o.label, state.statuses.has(o.key))).join('')
   const flagChips = FLAG_OPTIONS.map(o =>
     chip('flag', o.key, o.label, state.flags.has(o.key))).join('')
+  const caseChips = CASE_OPTIONS.map(o =>
+    chip('case', o.key, o.label, state.caseTypes.has(o.key))).join('')
+  const readinessChips = READINESS_OPTIONS.map(o =>
+    chip('readiness', o.key, o.label, state.readiness.has(o.key))).join('')
 
   return `
     <h1 style="margin-bottom:4px;">Map</h1>
@@ -81,6 +98,14 @@ function renderShell(properties) {
       <div class="filter-row">
         <span class="filter-label">Flag:</span>
         ${flagChips}
+      </div>
+      <div class="filter-row">
+        <span class="filter-label">Case type:</span>
+        ${caseChips}
+      </div>
+      <div class="filter-row">
+        <span class="filter-label" title="Read from the service-of-notice checkboxes. 'Ready' = OK box checked.">Readiness:</span>
+        ${readinessChips}
       </div>
       <div class="filter-row">
         <label class="small" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
@@ -133,7 +158,12 @@ function wireControls(el, properties) {
     c.addEventListener('click', () => {
       const group = c.dataset.filterGroup
       const key = c.dataset.filterKey
-      const target = group === 'status' ? state.statuses : state.flags
+      const target = {
+        status: state.statuses,
+        flag: state.flags,
+        case: state.caseTypes,
+        readiness: state.readiness,
+      }[group]
       if (target.has(key)) target.delete(key)
       else target.add(key)
       c.classList.toggle('active')
@@ -208,6 +238,13 @@ function popupHtml(p, status, condemned) {
   const tags = []
   if (condemned) tags.push('<span class="tag" style="background:#991b1b;color:white;">CONDEMNED</span>')
   if (isHilltopProperty(p)) tags.push('<span class="tag" style="background:#fed7aa;color:#9a3412;">Hilltop</span>')
+  const readyKey = saleReadiness(p)
+  if (readyKey) {
+    const rs = { ready: 'background:#d1fae5;color:#065f46;', in_progress: 'background:#fef3c7;color:#b45309;', not_started: 'background:#e5e7eb;color:#374151;' }
+    tags.push(`<span class="tag" style="${rs[readyKey]}">${escapeHtml(READINESS_META[readyKey].label)}</span>`)
+  }
+  const caseKey = caseCategory(p.caseNumber)
+  if (caseKey) tags.push(`<span class="tag">${escapeHtml(CASE_CATEGORY_META[caseKey].label)}</span>`)
   if (flagTag) tags.push(flagTag)
 
   const bid = p.history[0]?.openingBid != null
@@ -284,6 +321,13 @@ function passesFilters(p) {
   const flag = p.userFields?.flag
   const fk = flag === 'interested' ? 'interested' : flag === 'skip' ? 'skip' : 'unflagged'
   if (!state.flags.has(fk)) return false
+
+  const caseKey = caseCategory(p.caseNumber)
+  if (caseKey && !state.caseTypes.has(caseKey)) return false
+
+  const readyKey = saleReadiness(p)
+  if (readyKey && !state.readiness.has(readyKey)) return false
+  if (!readyKey && state.readiness.size < READINESS_OPTIONS.length) return false
 
   if (state.hilltopOnly && !isHilltopProperty(p)) return false
   if (state.condemnedOnly && !lookupCondemned(p)) return false

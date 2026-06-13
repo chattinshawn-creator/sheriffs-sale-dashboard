@@ -5,6 +5,7 @@ import { renderUpload } from './views/upload.js'
 import { renderSettings } from './views/settings.js'
 import { renderProperty } from './views/property.js'
 import { renderMap } from './views/map.js'
+import { renderTrends } from './views/trends.js'
 
 const app = document.getElementById('app')
 
@@ -21,6 +22,7 @@ registerRoute('/upload/:uploadId', renderUpload)
 registerRoute('/settings', renderSettings)
 registerRoute('/property/:caseNumber', renderProperty)
 registerRoute('/map', renderMap)
+registerRoute('/trends', renderTrends)
 
 if (!window.location.hash) navigate('/')
 startRouter(mainEl)

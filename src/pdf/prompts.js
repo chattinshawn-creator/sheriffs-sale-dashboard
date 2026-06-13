@@ -34,12 +34,35 @@ disambiguate, not strict positional rules.
   "Real Estate Sale - Mortgage Foreclosure" (bank foreclosure)
   "Real Estate Sale" (generic)
   Plus other variations.
-- status: The sale status. Examples: "Postponed to 7/6/2026", "Stayed",
-  "Active", "Sold". Copy verbatim including any date.
+- status: The sale status / outcome. Copy verbatim including any date or
+  dollar amount. On a RESULTS PDF this field encodes what actually happened
+  using a specific vocabulary — recognize these exact forms:
+    "Third Party - $X"        the property SOLD to an outside bidder for $X
+                              (X is the true market price the buyer paid).
+    "PLTF Overbid - $X"       the plaintiff bid above its cost; sold back to
+                              the plaintiff for $X.
+    "PLTF Cost - $X" or
+    "PLTF Cost & Tax - $X"    went back to the plaintiff at cost for $X.
+    "Money Made"              sold; proceeds exceeded the debt (a price may or
+                              may not be shown).
+    "Postponed to <date>",
+    "Postponed (Waived) to <date>",
+    "PP Generally"            rolled to a later sale.
+    "Stayed"                  the sale was halted.
+  On a LISTINGS PDF the status is typically "Active", "Postponed to <date>",
+  or "Stayed". Copy whatever the source shows, verbatim.
 - tracts: Integer. Usually 1. A value > 1 means multiple addresses on one case.
 - openingBid: The "Cost & Tax Bid" dollar amount, as a NUMBER (e.g. 56872.30),
   not a string. Strip "$" and commas.
-- serviceFlags: The service-of-notice column flags ("XX", "X", "XXX", etc.).
+- serviceFlags: The service-of-notice column flags as shown ("XX", "X", "XXX", etc.).
+- serviceOk: boolean. The service column is a row of checkboxes with headers
+  like "Svs", "3129.2", "3129.3", "OK" (left to right). Set serviceOk to TRUE
+  only if the RIGHTMOST "OK" box is marked with an X (the property is cleared
+  and ready to go to sale). Set FALSE if the OK box is empty. If you genuinely
+  cannot tell, use null.
+- serviceCheckedCount: integer — how many of the service checkboxes in that row
+  are marked with an X. Use 0 if none are checked. This lets the app tell
+  "no progress" (0) from "in progress but not cleared" (>0, OK empty).
 - plaintiff: Plaintiff name. Plaintiff type depends on sale type:
   - Tax-lien sales: a school district, borough, township, or
     sewer/water authority (e.g. "Munhall Borough", "Penn Hills School District")
@@ -61,9 +84,17 @@ disambiguate, not strict positional rules.
   Do NOT include the "Parcel/Tax ID:" label in the value. If you cannot
   read a parcel ID that cleanly matches this format, return null rather
   than guessing — do NOT invent letters or digits.
-- soldFor: For results PDFs only — sale price as a number if the property was
-  sold this period; otherwise null.
-- soldTo: Purchaser name if sold this period; otherwise null.
+- soldFor: For results PDFs only — the SALE PRICE as a NUMBER (strip "$" and
+  commas). Set it to the dollar amount shown in the status for "Third Party",
+  "PLTF Overbid", and "PLTF Cost"/"PLTF Cost & Tax" outcomes. For "Money Made"
+  use the number only if one is explicitly shown, else null. For "Postponed",
+  "Stayed", "Active", or any non-sale status, use null.
+  ⚠️ soldFor is NOT the same as openingBid. openingBid is the "Cost & Tax Bid"
+  (the debt owed); soldFor is what the property actually sold for. They are
+  different numbers — never copy one into the other.
+- soldTo: The purchaser's name when one is named (e.g. the third-party bidder).
+  For plaintiff overbid/cost outcomes the purchaser is effectively the
+  plaintiff; name it if the source does, otherwise null. Null when not sold.
 
 ## Multi-tract properties (tracts > 1)
 
@@ -124,6 +155,8 @@ Return ONLY a JSON object, no prose, no markdown fences. Shape:
       "tracts": 1,
       "openingBid": 56872.30,
       "serviceFlags": "XX",
+      "serviceOk": false,
+      "serviceCheckedCount": 2,
       "plaintiff": "Liberty Borough",
       "plaintiffAttorney": "KRATZENBERG & LAZZARO",
       "defendant": "Rudberg Jr., Donald L",

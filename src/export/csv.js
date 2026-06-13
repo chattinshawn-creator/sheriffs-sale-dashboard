@@ -2,6 +2,7 @@ import { isHilltopProperty } from '../enrichment/hilltop.js'
 import { getCondemnedInfoSync } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
 import { validateProperty } from '../pdf/validation.js'
+import { caseCategory, saleReadiness, serviceStateForProperty, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
 import { formatMonth } from '../ui/format.js'
 
 /**
@@ -22,6 +23,10 @@ const COLUMNS = [
   ['Sale month',        p => formatMonth(p.history[0]?.saleMonth)],
   ['Status',            p => p.history[0]?.status],
   ['Sale type',         p => p.saleType],
+  ['Case type',         p => caseLabel(p)],
+  ['Sale readiness',    p => readinessLabel(p)],
+  ['Service boxes checked', p => serviceStateForProperty(p).serviceCheckedCount],
+  ['OK box checked?',   p => { const s = serviceStateForProperty(p).serviceOk; return s === true ? 'yes' : s === false ? 'no' : '' }],
   ['Opening bid',       p => p.history[0]?.openingBid],
   ['WPRDC fair market', p => p.enrichmentSummary?.fairMarketValue],
   ['Your ARV override', p => p.userFields?.arvOverride],
@@ -52,6 +57,16 @@ const COLUMNS = [
   }],
   ['Sale number',       p => p.saleNumber],
 ]
+
+function caseLabel(p) {
+  const k = caseCategory(p.caseNumber)
+  return k ? CASE_CATEGORY_META[k].label : ''
+}
+
+function readinessLabel(p) {
+  const k = saleReadiness(p)
+  return k ? READINESS_META[k].label : ''
+}
 
 function spreadOf(p) {
   const bid = p.history[0]?.openingBid

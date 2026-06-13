@@ -152,7 +152,12 @@ export async function parsePdf(uploadId, options = {}) {
     // Save all properties (originals + repaired) with their validation stamps.
     for (const p of properties) {
       if (!p.caseNumber) continue
-      await upsertProperty(p, { uploadId, saleMonth: upload.saleMonth })
+      await upsertProperty(p, {
+        uploadId,
+        saleMonth: upload.saleMonth,
+        uploadType: upload.type,
+        uploadedAt: upload.uploadedAt,
+      })
       savedCount++
       if (p._validation && !p._validation.ok) flaggedCount++
     }

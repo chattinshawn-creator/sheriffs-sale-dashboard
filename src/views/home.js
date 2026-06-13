@@ -1,6 +1,8 @@
 import { listUploads } from '../storage/uploads.js'
 import { listProperties } from '../storage/properties.js'
 import { validateProperty } from '../pdf/validation.js'
+import { statusBucketFor } from '../pdf/outcome.js'
+import { caseCategory, saleReadiness, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
 import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
 import { enrichAllProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
@@ -16,6 +18,8 @@ const state = {
   sort: 'sale-month',
   statuses: new Set(['active', 'postponed', 'stayed', 'sold']),
   flags: new Set(['interested', 'skip', 'unflagged']),
+  caseTypes: new Set(['mortgage', 'tax_other']),
+  readiness: new Set(['ready', 'in_progress', 'not_started']),
   needsReviewOnly: false,
   hilltopOnly: false,
   condemnedOnly: false,
@@ -31,6 +35,15 @@ const FLAG_OPTIONS = [
   { key: 'interested', label: 'Interested' },
   { key: 'skip',       label: 'Skip' },
   { key: 'unflagged',  label: 'Unflagged' },
+]
+const CASE_OPTIONS = [
+  { key: 'mortgage',  label: CASE_CATEGORY_META.mortgage.label },
+  { key: 'tax_other', label: CASE_CATEGORY_META.tax_other.label },
+]
+const READINESS_OPTIONS = [
+  { key: 'ready',       label: READINESS_META.ready.label },
+  { key: 'in_progress', label: READINESS_META.in_progress.label },
+  { key: 'not_started', label: READINESS_META.not_started.label },
 ]
 const SORT_OPTIONS = [
   { key: 'sale-month',  label: 'Sale month (grouped)' },
@@ -247,6 +260,12 @@ function renderFilterBar() {
   const flagChips = FLAG_OPTIONS.map(o =>
     chip('flag', o.key, o.label, state.flags.has(o.key))
   ).join('')
+  const caseChips = CASE_OPTIONS.map(o =>
+    chip('case', o.key, o.label, state.caseTypes.has(o.key))
+  ).join('')
+  const readinessChips = READINESS_OPTIONS.map(o =>
+    chip('readiness', o.key, o.label, state.readiness.has(o.key))
+  ).join('')
 
   return `
     <div class="filter-bar">
@@ -266,6 +285,16 @@ function renderFilterBar() {
       <div class="filter-row">
         <span class="filter-label">Flag:</span>
         ${flagChips}
+      </div>
+
+      <div class="filter-row">
+        <span class="filter-label">Case type:</span>
+        ${caseChips}
+      </div>
+
+      <div class="filter-row">
+        <span class="filter-label" title="Read from the service-of-notice checkboxes. 'Ready' = OK box checked.">Readiness:</span>
+        ${readinessChips}
       </div>
 
       <div class="filter-row">
@@ -334,7 +363,12 @@ function wireControls(el, properties) {
     chipEl.addEventListener('click', () => {
       const group = chipEl.dataset.filterGroup
       const key = chipEl.dataset.filterKey
-      const targetSet = group === 'status' ? state.statuses : state.flags
+      const targetSet = {
+        status: state.statuses,
+        flag: state.flags,
+        case: state.caseTypes,
+        readiness: state.readiness,
+      }[group]
       if (targetSet.has(key)) targetSet.delete(key)
       else targetSet.add(key)
       chipEl.classList.toggle('active')
@@ -348,6 +382,8 @@ function wireControls(el, properties) {
     state.sort = 'sale-month'
     state.statuses = new Set(['active', 'postponed', 'stayed', 'sold'])
     state.flags = new Set(['interested', 'skip', 'unflagged'])
+    state.caseTypes = new Set(['mortgage', 'tax_other'])
+    state.readiness = new Set(['ready', 'in_progress', 'not_started'])
     state.needsReviewOnly = false
     // Full re-render to reset all the controls.
     renderHome(el)
@@ -375,6 +411,12 @@ function currentFilterSummary() {
   }
   if (state.flags.size < FLAG_OPTIONS.length) {
     parts.push('flag-' + [...state.flags].sort().join('+'))
+  }
+  if (state.caseTypes.size < CASE_OPTIONS.length) {
+    parts.push([...state.caseTypes].sort().join('+'))
+  }
+  if (state.readiness.size < READINESS_OPTIONS.length) {
+    parts.push('ready-' + [...state.readiness].sort().join('+'))
   }
   if (state.needsReviewOnly) parts.push('needs-review')
   if (state.hilltopOnly) parts.push('hilltop')
@@ -422,13 +464,11 @@ function applyFilters(properties) {
       if (!hay.includes(q)) return false
     }
 
-    // Status filter — match against CURRENT status (most recent history entry)
-    const status = String(p.history[0]?.status || '').toLowerCase()
-    const statusKey =
-      /^active/.test(status)    ? 'active' :
-      /^postponed/.test(status) ? 'postponed' :
-      /^stayed/.test(status)    ? 'stayed' :
-      /^sold/.test(status)      ? 'sold' : null
+    // Status filter — match against CURRENT status (most recent history entry).
+    // Uses the derived outcomeCategory when present, falling back to the raw
+    // status text for history entries saved before outcomeCategory existed.
+    const h0 = p.history[0]
+    const statusKey = statusBucketFor(h0?.outcomeCategory, h0?.status)
     if (statusKey && !state.statuses.has(statusKey)) return false
     if (!statusKey && state.statuses.size < STATUS_OPTIONS.length) {
       // Unknown status — only show if all status filters are on
@@ -441,6 +481,17 @@ function applyFilters(properties) {
                   : flag === 'skip'       ? 'skip'
                   : 'unflagged'
     if (!state.flags.has(flagKey)) return false
+
+    // Case-type filter (Mortgage vs Tax/Other)
+    const caseKey = caseCategory(p.caseNumber)
+    if (caseKey && !state.caseTypes.has(caseKey)) return false
+
+    // Readiness filter (from service checkboxes). Unknown readiness (old data
+    // parsed before this field existed) is only hidden when the filter is
+    // actively narrowed — same convention as the status filter.
+    const readyKey = saleReadiness(p)
+    if (readyKey && !state.readiness.has(readyKey)) return false
+    if (!readyKey && state.readiness.size < READINESS_OPTIONS.length) return false
 
     // Needs-review filter
     if (state.needsReviewOnly) {
@@ -566,6 +617,19 @@ function renderPropertyCard(prop, h) {
   }
   if (prop.tracts > 1) {
     flagsHtml.push(`<span class="tag">${prop.tracts} tracts</span>`)
+  }
+  const readyKey = saleReadiness(prop)
+  if (readyKey) {
+    const styleByKey = {
+      ready:       'background:#d1fae5;color:#065f46;border-color:#a7f3d0;',
+      in_progress: 'background:#fef3c7;color:#b45309;border-color:#fde68a;',
+      not_started: 'background:#e5e7eb;color:#374151;border-color:#d1d5db;',
+    }
+    flagsHtml.push(`<span class="tag" style="${styleByKey[readyKey]}" title="${escapeAttr(READINESS_META[readyKey].hint)}">${escapeHtml(READINESS_META[readyKey].label)}</span>`)
+  }
+  const caseKey = caseCategory(prop.caseNumber)
+  if (caseKey) {
+    flagsHtml.push(`<span class="tag" title="${escapeAttr(CASE_CATEGORY_META[caseKey].hint)}">${escapeHtml(CASE_CATEGORY_META[caseKey].label)}</span>`)
   }
 
   const spread = getSpread(prop)

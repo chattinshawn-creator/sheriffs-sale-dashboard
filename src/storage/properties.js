@@ -1,4 +1,6 @@
 import { stores, get, set, values } from './db.js'
+import { deriveOutcomeCategory, parseStatusAmount, SALE_CATEGORIES } from '../pdf/outcome.js'
+import { compareHistoryEntries } from './history-order.js'
 
 /**
  * Canonical property shape. Keyed by `caseNumber` (e.g. "GD-16-022895"),
@@ -106,20 +108,43 @@ const PARSER_FIELDS = [
  * @param {object} parsed - one entry from the parser's output
  * @param {{uploadId: string, saleMonth: string}} ctx
  */
-export async function upsertProperty(parsed, { uploadId, saleMonth }) {
+export async function upsertProperty(parsed, { uploadId, saleMonth, uploadType, uploadedAt }) {
   if (!parsed.caseNumber) {
     throw new Error('upsertProperty: parsed record has no caseNumber')
   }
 
   const existing = await get(parsed.caseNumber, stores.properties)
 
+  // Classify the raw status into a stable category, and back-fill soldFor
+  // from the status text ("Third Party - $X") when the parser didn't set it
+  // but the outcome implies a price. openingBid (the "Cost & Tax Bid" debt
+  // amount) is kept DISTINCT from soldFor — they are different numbers.
+  const outcomeCategory = deriveOutcomeCategory(parsed.status)
+  let soldFor = parsed.soldFor ?? null
+  if (soldFor == null && SALE_CATEGORIES.has(outcomeCategory)) {
+    soldFor = parseStatusAmount(parsed.status)
+  }
+
+  // Surface anything we couldn't classify so unmatched status vocabulary can
+  // be reviewed and folded into outcome.js.
+  if (outcomeCategory === 'other' && parsed.status) {
+    console.warn(`[outcome] unclassified status (→ "other"): ${JSON.stringify(parsed.status)} [case ${parsed.caseNumber}]`)
+  }
+
   const newHistoryEntry = {
     saleMonth,
     uploadId,
+    uploadType: uploadType ?? null,   // 'listings' | 'results' — for tie-break ordering
+    uploadedAt: uploadedAt ?? null,
     status: parsed.status ?? null,
+    outcomeCategory,
     openingBid: parsed.openingBid ?? null,
-    soldFor: parsed.soldFor ?? null,
+    soldFor,
     soldTo: parsed.soldTo ?? null,
+    // Service-of-notice box state is per-sale (it lives on the listings sale),
+    // so it belongs on the history entry, not the top-level record.
+    serviceOk: parsed.serviceOk ?? null,
+    serviceCheckedCount: typeof parsed.serviceCheckedCount === 'number' ? parsed.serviceCheckedCount : null,
   }
 
   if (!existing) {
@@ -134,10 +159,9 @@ export async function upsertProperty(parsed, { uploadId, saleMonth }) {
   }
 
   // Replace any existing entry for this same upload (re-parse case), then
-  // sort descending by saleMonth.
+  // sort newest-first (with same-month listings/results tie-break).
   const otherHistory = existing.history.filter(h => h.uploadId !== uploadId)
-  const newHistory = [...otherHistory, newHistoryEntry]
-    .sort((a, b) => (b.saleMonth || '').localeCompare(a.saleMonth || ''))
+  const newHistory = [...otherHistory, newHistoryEntry].sort(compareHistoryEntries)
 
   const isMostRecent = newHistory[0].uploadId === uploadId
 
