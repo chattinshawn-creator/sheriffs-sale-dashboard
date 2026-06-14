@@ -12,6 +12,7 @@ import { isHilltopProperty } from '../enrichment/hilltop.js'
 import { getCondemnedInfo } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
 import { serviceStateForProperty, saleReadiness, READINESS_META } from '../pdf/classify.js'
+import { OUTCOME_META, SALE_CATEGORIES } from '../pdf/outcome.js'
 import { formatMonth, escapeHtml, escapeAttr } from '../ui/format.js'
 
 export async function renderProperty(el, params) {
@@ -86,6 +87,7 @@ function renderShell(prop, current, uploadsByHistory, score) {
     ${renderEnrichmentPlaceholder()}
     ${renderPittsburghPlaceholder(prop)}
     ${prop.tracts > 1 ? renderMultiTractCard(prop) : ''}
+    ${renderTimelineCard(prop)}
     ${renderHistoryCard(prop, uploadsByHistory)}
     ${renderCommentsCard(prop)}
   `
@@ -586,6 +588,121 @@ function renderMultiTractCard(prop) {
     <div class="card">
       <h3 style="margin-top:0;">All ${prop.tracts} addresses on this case</h3>
       <ul style="padding-left:20px;">${items}</ul>
+    </div>
+  `
+}
+
+// ─── Timeline (the month-by-month story) ───────────────────────────────────
+
+/**
+ * Per-category visual styling for a timeline entry. The dot color and badge
+ * mirror the meaning the Trends view leans on: a third-party sale is a TRUE
+ * MARKET price (green), a plaintiff overbid/cost is the lender taking the
+ * property back (blue), postponed is amber, stayed is red, other is grey.
+ */
+const TIMELINE_STYLE = {
+  sold_third_party:  { dot: '#059669', bg: '#d1fae5', fg: '#065f46', border: '#a7f3d0' },
+  plaintiff_overbid: { dot: '#2563eb', bg: '#dbeafe', fg: '#1e40af', border: '#bfdbfe' },
+  plaintiff_cost:    { dot: '#2563eb', bg: '#dbeafe', fg: '#1e40af', border: '#bfdbfe' },
+  money_made:        { dot: '#059669', bg: '#d1fae5', fg: '#065f46', border: '#a7f3d0' },
+  postponed:         { dot: '#d97706', bg: '#fef3c7', fg: '#b45309', border: '#fde68a' },
+  stayed:            { dot: '#dc2626', bg: '#fee2e2', fg: '#991b1b', border: '#fecaca' },
+  other:             { dot: '#9ca3af', bg: '#e5e7eb', fg: '#374151', border: '#d1d5db' },
+}
+
+/**
+ * Pull the next-sale date out of a postponement status like
+ * "Postponed to 7/1/26" or "Postponed (Waived) to 5-4-26". Returns the raw
+ * date string verbatim (we never reformat parsed dates), or null.
+ */
+function postponedToDate(status) {
+  if (!status) return null
+  const m = String(status).match(/\bto\s+(\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4})/i)
+  return m ? m[1] : null
+}
+
+function renderTimelineCard(prop) {
+  const history = prop.history || []
+  if (history.length === 0) return ''
+
+  // history is stored newest-first; the timeline reads oldest → newest so it
+  // tells the property's story in order.
+  const chronological = [...history].reverse()
+
+  const latest = history[0] || {}
+  const everSold = history.some(h => SALE_CATEGORIES.has(h.outcomeCategory))
+  const latestLabel = OUTCOME_META[latest.outcomeCategory]?.label || latest.status || 'unknown'
+
+  let summary
+  if (history.length === 1) {
+    const only = history[0]
+    summary = `First appeared ${escapeHtml(formatMonth(only.saleMonth))} — no prior sales history. `
+            + `Status: <strong>${escapeHtml(latestLabel)}</strong>.`
+  } else {
+    summary = `Appeared in <strong>${history.length}</strong> sales. `
+            + `Latest (${escapeHtml(formatMonth(latest.saleMonth))}): <strong>${escapeHtml(latestLabel)}</strong>. `
+            + (everSold
+                ? `Has <strong style="color:var(--color-ok)">sold</strong> at least once.`
+                : `Has <strong>never sold</strong>.`)
+  }
+
+  const items = chronological.map(h => renderTimelineEntry(h)).join('')
+
+  return `
+    <div class="card">
+      <h3 style="margin-top:0;">Timeline</h3>
+      <p class="muted small" style="margin-top:0;">${summary}</p>
+      <div style="position:relative;margin-top:12px;padding-left:22px;border-left:2px solid var(--color-border);">
+        ${items}
+      </div>
+    </div>
+  `
+}
+
+function renderTimelineEntry(h) {
+  const cat = h.outcomeCategory || 'other'
+  const style = TIMELINE_STYLE[cat] || TIMELINE_STYLE.other
+  const label = OUTCOME_META[cat]?.label || h.status || 'Unknown'
+  const isSale = SALE_CATEGORIES.has(cat)
+  const isMarket = !!OUTCOME_META[cat]?.isMarket
+
+  // Detail line under the status badge — sale price + buyer for sales,
+  // next-sale date for postponements, opening bid otherwise.
+  const detailBits = []
+  if (isSale && h.soldFor != null) {
+    const kind = isMarket
+      ? '<span style="color:var(--color-ok);font-weight:600;">market sale</span>'
+      : '<span style="color:#1e40af;font-weight:600;">lender took it back</span>'
+    detailBits.push(`Sold for <strong>$${h.soldFor.toLocaleString()}</strong> (${kind})`)
+    if (h.soldTo) detailBits.push(`to ${escapeHtml(h.soldTo)}`)
+  } else if (cat === 'postponed') {
+    const next = postponedToDate(h.status)
+    if (next) detailBits.push(`Rolled to next sale on <strong>${escapeHtml(next)}</strong>`)
+  }
+  if (h.openingBid != null) {
+    detailBits.push(`<span class="muted">opening bid $${h.openingBid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>`)
+  }
+  const detail = detailBits.length
+    ? `<div class="small" style="margin-top:2px;">${detailBits.join(' · ')}</div>`
+    : ''
+
+  // Show the raw status as a subtle note when it differs from the friendly
+  // label (e.g. "Postponed to 7/1/26" vs the "Postponed" badge), so nothing
+  // from the PDF is hidden.
+  const rawNote = h.status && h.status.toLowerCase() !== label.toLowerCase()
+    ? `<div class="muted small" style="margin-top:2px;">“${escapeHtml(h.status)}”</div>`
+    : ''
+
+  return `
+    <div style="position:relative;padding:0 0 16px 14px;">
+      <span style="position:absolute;left:-23px;top:2px;width:12px;height:12px;border-radius:50%;
+                   background:${style.dot};border:2px solid var(--color-bg, #fff);box-shadow:0 0 0 1px ${style.dot};"></span>
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;">
+        <strong>${escapeHtml(formatMonth(h.saleMonth))}</strong>
+        <span class="tag" style="background:${style.bg};color:${style.fg};border-color:${style.border};">${escapeHtml(label)}</span>
+      </div>
+      ${detail}
+      ${rawNote}
     </div>
   `
 }
