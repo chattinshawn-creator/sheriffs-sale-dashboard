@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { computeScores, effectiveWeights, buildValueMedians } from './score.js'
 import {
-  haversineMiles, postponementCount, estimatedValue, FACTORS,
+  haversineMiles, postponementCount, estimatedValue, sizeSubScore, FACTORS,
 } from './factors.js'
 
 let passed = 0
@@ -154,13 +154,44 @@ test('price: missing value AND cost -> neutral 50 flagged', () => {
   assert.equal(f.estimated, true)
 })
 
-// ── size composite: averages available components ────────────────────────────
-test('size: bigger sqft/beds/baths scores higher; partial data averages', () => {
-  const big = prop('BIG', { enrich: { squareFeet: 2000, bedrooms: 4, bathrooms: 3 } })
-  const small = prop('SMALL', { enrich: { squareFeet: 800, bedrooms: 2, bathrooms: 1 } })
-  const r = computeScores([big, small], { weights: onlyWeights('size') })
-  assert.equal(r.get('BIG').final, 100)
-  assert.equal(r.get('SMALL').final, 1)
+// ── size: fixed diminishing-returns curve (NOT month-relative) ───────────────
+test('sizeSubScore: matches the calibration anchors for real specs', () => {
+  const round = v => Math.round(sizeSubScore(v))
+  // {beds, baths, sqft} → expected sub-score from the anchor table.
+  assert.equal(round({ beds: 2, baths: 1, sqft: 750 }), 10)   // tiny
+  assert.equal(round({ beds: 3, baths: 1, sqft: 1250 }), 40)  // below average
+  assert.equal(round({ beds: 4, baths: 2, sqft: 2000 }), 62)
+  assert.equal(round({ beds: 4, baths: 4, sqft: 3500 }), 90)  // ideal rental
+  assert.equal(round({ beds: 6, baths: 4, sqft: 5000 }), 96)  // bigger: gentle climb
+  assert.equal(round({ beds: 0, baths: 0, sqft: 8000 }), 44)  // commercial: lands low
+})
+
+test('sizeSubScore: huge sqft with no beds/baths cannot top the curve', () => {
+  // The bug the rework fixes: a warehouse riding square footage alone. Missing
+  // beds/baths count as 0, so it stays mid-low, never near 100.
+  assert.equal(Math.round(sizeSubScore({ sqft: 8000, beds: null, baths: null })), 44)
+  assert.ok(sizeSubScore({ sqft: 8000, beds: null, baths: null }) <
+            sizeSubScore({ beds: 4, baths: 4, sqft: 3500 }))
+})
+
+test('sizeSubScore: all three components absent → null (engine flags estimated)', () => {
+  assert.equal(sizeSubScore({ sqft: null, beds: null, baths: null }), null)
+  assert.equal(sizeSubScore(null), null)
+})
+
+test('size: is absolute, not month-relative (a lone property still scores on the curve)', () => {
+  // Old min-max gave a single-property month a degenerate neutral 50. The fixed
+  // curve gives it its true score regardless of what else is listed that month.
+  const solo = prop('SOLO', { enrich: { squareFeet: 3500, bedrooms: 4, bathrooms: 4 } })
+  const r = computeScores([solo], { weights: onlyWeights('size') })
+  assert.equal(r.get('SOLO').final, 90)
+})
+
+test('size: missing all size fields → neutral 50, flagged', () => {
+  const r = computeScores([prop('A', { enrich: {} })], { weights: onlyWeights('size') })
+  const f = r.get('A').factors.find(x => x.key === 'size')
+  assert.equal(f.score, 50)
+  assert.equal(f.estimated, true)
 })
 
 // ── value medians fallback (pure) ────────────────────────────────────────────

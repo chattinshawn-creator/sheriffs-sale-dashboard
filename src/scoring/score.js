@@ -4,9 +4,12 @@
  * properties + weights; this module returns a score + factor breakdown for each.
  *
  * Scaling model (confirmed with the user):
- *   - Each 'minmax' / 'size' factor is normalized RELATIVE TO ITS OWN SALE-MONTH
- *     GROUP: the best property that month = 100, the worst = 0. So this month's
+ *   - Each 'minmax' factor is normalized RELATIVE TO ITS OWN SALE-MONTH GROUP:
+ *     the best property that month = 100, the worst = 0. So this month's
  *     listings compete against each other, not against the whole archive.
+ *   - 'size' uses a FIXED diminishing-returns curve (see factors.sizeSubScore),
+ *     NOT month-relative scaling — so a lone giant commercial parcel can't seize
+ *     the "100" and bury an ideal rental.
  *   - 'boolean' (Opportunity Zone) and 'categorical' (lien type) map to fixed
  *     0-100 values and ignore the month set.
  *   - Missing data for a factor => sub-score 50, flagged `estimated:true`. The
@@ -16,7 +19,7 @@
  * A factor at weight 0 contributes nothing (turned off). final =
  * round( Σ subScore_i × effectiveWeight_i ), floored at 1, capped at 100.
  */
-import { FACTORS, isNum } from './factors.js'
+import { FACTORS, isNum, sizeSubScore } from './factors.js'
 import { extractSales, median } from '../trends/aggregate.js'
 
 /** Sale prices at or below this are treated as nominal ($1 / $0 / symbolic gift
@@ -97,15 +100,10 @@ function computeMonthStats(byMonth, ctx) {
   for (const [month, props] of byMonth) {
     const s = {}
     for (const f of FACTORS) {
+      // Only 'minmax' factors need a month-relative range. 'size' is a fixed
+      // absolute curve and 'boolean'/'categorical' map directly.
       if (f.kind === 'minmax') {
         s[f.key] = rangeOf(props.map(p => f.getRaw(p, ctx)))
-      } else if (f.kind === 'size') {
-        const raws = props.map(p => f.getRaw(p, ctx)).filter(Boolean)
-        s[f.key] = {
-          sqft: rangeOf(raws.map(r => r.sqft)),
-          beds: rangeOf(raws.map(r => r.beds)),
-          baths: rangeOf(raws.map(r => r.baths)),
-        }
       }
     }
     stats.set(month, s)
@@ -133,14 +131,9 @@ function subScoreFor(factor, prop, ctx, monthStat) {
   }
 
   if (factor.kind === 'size') {
-    if (!raw) return { score: NEUTRAL, estimated: true, raw: null }
-    const ranges = monthStat[factor.key]
-    const parts = []
-    for (const comp of ['sqft', 'beds', 'baths']) {
-      if (isNum(raw[comp])) parts.push(scaleToRange(raw[comp], ranges[comp], 'high'))
-    }
-    if (parts.length === 0) return { score: NEUTRAL, estimated: true, raw }
-    return { score: parts.reduce((a, b) => a + b, 0) / parts.length, estimated: false, raw }
+    const s = sizeSubScore(raw) // fixed curve, not month-relative
+    if (s == null) return { score: NEUTRAL, estimated: true, raw }
+    return { score: s, estimated: false, raw }
   }
 
   return { score: NEUTRAL, estimated: true, raw: null }
