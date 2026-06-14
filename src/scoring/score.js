@@ -10,6 +10,10 @@
  *   - 'size' uses a FIXED diminishing-returns curve (see factors.sizeSubScore),
  *     NOT month-relative scaling — so a lone giant commercial parcel can't seize
  *     the "100" and bury an ideal rental.
+ *   - 'distance' likewise uses a FIXED diminishing-returns curve on miles from
+ *     the reference point (see factors.distanceSubScore) — closeness to YOUR
+ *     point is absolute, not relative to the month's docket. Steep for the first
+ *     ~2 miles, then flattens fast.
  *   - 'boolean' (Opportunity Zone) and 'categorical' (lien type) map to fixed
  *     0-100 values and ignore the month set.
  *   - Missing data for a factor => sub-score 50, flagged `estimated:true`. The
@@ -19,7 +23,7 @@
  * A factor at weight 0 contributes nothing (turned off). final =
  * round( Σ subScore_i × effectiveWeight_i ), floored at 1, capped at 100.
  */
-import { FACTORS, isNum, sizeSubScore } from './factors.js'
+import { FACTORS, isNum, sizeSubScore, distanceSubScore } from './factors.js'
 import { extractSales, median } from '../trends/aggregate.js'
 
 /** Sale prices at or below this are treated as nominal ($1 / $0 / symbolic gift
@@ -100,8 +104,8 @@ function computeMonthStats(byMonth, ctx) {
   for (const [month, props] of byMonth) {
     const s = {}
     for (const f of FACTORS) {
-      // Only 'minmax' factors need a month-relative range. 'size' is a fixed
-      // absolute curve and 'boolean'/'categorical' map directly.
+      // Only 'minmax' factors need a month-relative range. 'size'/'distance'
+      // are fixed absolute curves and 'boolean'/'categorical' map directly.
       if (f.kind === 'minmax') {
         s[f.key] = rangeOf(props.map(p => f.getRaw(p, ctx)))
       }
@@ -133,6 +137,12 @@ function subScoreFor(factor, prop, ctx, monthStat) {
   if (factor.kind === 'size') {
     const s = sizeSubScore(raw) // fixed curve, not month-relative
     if (s == null) return { score: NEUTRAL, estimated: true, raw }
+    return { score: s, estimated: false, raw }
+  }
+
+  if (factor.kind === 'distance') {
+    const s = distanceSubScore(raw) // fixed curve, not month-relative
+    if (s == null) return { score: NEUTRAL, estimated: true, raw: null }
     return { score: s, estimated: false, raw }
   }
 
