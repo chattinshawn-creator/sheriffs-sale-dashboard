@@ -9,7 +9,8 @@
  *                  'minmax'      — scaled relative to the month's set (see direction)
  *                  'boolean'     — true=100, false=0
  *                  'categorical' — getRaw returns the 0-100 score directly
- *                  'size'        — composite of sqft/beds/baths, min-maxed per component
+ *                  'size'        — FIXED diminishing-returns curve vs. an ideal
+ *                                  rental (NOT month-relative); see sizeSubScore
  *   direction  — for 'minmax' only: 'high' (bigger raw = higher score) or
  *                'low' (smaller raw = higher score)
  *   getRaw(prop, ctx) — pull the raw value from the canonical property. Returns
@@ -122,7 +123,7 @@ export const FACTORS = [
   {
     key: 'size',
     label: 'Size (sq ft, beds, baths)',
-    hint: 'Bigger living area / more bedrooms & bathrooms scores higher.',
+    hint: 'Reaching a good rental size (4 bd / 4 ba / 3,500 sq ft) scores high; bigger adds little more.',
     kind: 'size',
     getRaw: (p) => {
       const s = p.enrichmentSummary || {}
@@ -212,4 +213,73 @@ export function haversineMiles(lat1, lng1, lat2, lng2) {
   const a = Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)))
+}
+
+// ── Size: fixed diminishing-returns curve (NOT month-relative) ───────────────
+//
+// Min-max scaling let one giant commercial parcel grab the "100" slot, pushing
+// an ideal rental (4 bd / 4 ba / 3,500 sq ft) down into the 60s. Instead we
+// score size on a fixed curve: rewards reaching a good-rental size, gives little
+// extra for exceeding it, and has a floor so tiny units don't bottom out at 0.
+
+/** Ideal-rental target every size ratio is measured against. */
+export const SIZE_TARGET = { beds: 4, baths: 4, sqft: 3500 }
+
+/** No single dimension beyond 1.5× the ideal adds anything — this is what stops
+ *  a big warehouse from dominating on square footage alone. */
+export const SIZE_RATIO_CAP = 1.5
+
+/** Anchor points mapping sizeIndex → 0-100 sub-score (linearly interpolated,
+ *  clamped at both ends). Calibrated to real examples: 2/1/750 ≈ 10,
+ *  3/1/1250 ≈ 40 (below average), 4/4/3500 ≈ 90, larger climbs gently to 100. */
+export const SIZE_ANCHORS = [
+  { x: 0.25, y: 0 },
+  { x: 0.321, y: 10 },
+  { x: 0.452, y: 40 },
+  { x: 1.00, y: 90 },
+  { x: 1.50, y: 100 },
+]
+
+/** Piecewise-linear interpolation through ascending (x,y) anchors. Values below
+ *  the first anchor clamp to its y; above the last clamp to its y. */
+export function interpolateAnchors(x, anchors) {
+  if (x <= anchors[0].x) return anchors[0].y
+  const last = anchors[anchors.length - 1]
+  if (x >= last.x) return last.y
+  for (let i = 1; i < anchors.length; i++) {
+    const a = anchors[i - 1]
+    const b = anchors[i]
+    if (x <= b.x) {
+      const t = (x - a.x) / (b.x - a.x)
+      return a.y + t * (b.y - a.y)
+    }
+  }
+  return last.y
+}
+
+/**
+ * Size sub-score (0-100) on the fixed curve. Steps:
+ *   1. ratios vs. the ideal rental, each capped at 1.5×:
+ *        bedRatio = beds/4, bathRatio = baths/4, sqftRatio = sqft/3500
+ *   2. sizeIndex = mean of the three (equal thirds). A MISSING component counts
+ *      as 0, not dropped — a parcel with finished area but no bedrooms is
+ *      non-residential and should land low (a warehouse mustn't ride sqft alone
+ *      to the top). Returns null only when sqft, beds AND baths are all absent,
+ *      so the engine flags it "estimated / no data" → neutral 50.
+ *   3. map sizeIndex through SIZE_ANCHORS.
+ *
+ * @param {{sqft:?number, beds:?number, baths:?number}|null} raw
+ * @returns {number|null}
+ */
+export function sizeSubScore(raw) {
+  if (!raw) return null
+  const { sqft, beds, baths } = raw
+  if (sqft == null && beds == null && baths == null) return null
+  const ratio = (val, target) => (isNum(val) ? Math.min(val / target, SIZE_RATIO_CAP) : 0)
+  const sizeIndex = (
+    ratio(beds, SIZE_TARGET.beds) +
+    ratio(baths, SIZE_TARGET.baths) +
+    ratio(sqft, SIZE_TARGET.sqft)
+  ) / 3
+  return interpolateAnchors(sizeIndex, SIZE_ANCHORS)
 }
