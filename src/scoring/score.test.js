@@ -8,7 +8,8 @@
 import assert from 'node:assert/strict'
 import { computeScores, effectiveWeights, buildValueMedians } from './score.js'
 import {
-  haversineMiles, postponementCount, estimatedValue, sizeSubScore, FACTORS,
+  haversineMiles, postponementCount, estimatedValue, sizeSubScore,
+  distanceSubScore, FACTORS,
 } from './factors.js'
 
 let passed = 0
@@ -190,6 +191,54 @@ test('size: is absolute, not month-relative (a lone property still scores on the
 test('size: missing all size fields → neutral 50, flagged', () => {
   const r = computeScores([prop('A', { enrich: {} })], { weights: onlyWeights('size') })
   const f = r.get('A').factors.find(x => x.key === 'size')
+  assert.equal(f.score, 50)
+  assert.equal(f.estimated, true)
+})
+
+// ── distance: fixed diminishing-returns curve (NOT month-relative) ───────────
+test('distanceSubScore: matches the calibration anchors', () => {
+  const round = mi => Math.round(distanceSubScore(mi))
+  assert.equal(round(0), 100)
+  assert.equal(round(1), 80)
+  assert.equal(round(2), 60)
+  assert.equal(round(4), 38)
+  assert.equal(round(5), 32)
+  assert.equal(round(25), 0)
+  assert.equal(round(100), 0) // beyond the last anchor clamps to 0
+})
+
+test('distanceSubScore: each mile diminishes, and the drop-off accelerates after 2 mi', () => {
+  const drop = (a, b) => distanceSubScore(a) - distanceSubScore(b)
+  // The 1→2 mi gap is large; the 4→5 mi gap is much less (the user's example).
+  const near = drop(1, 2)   // 20
+  const far = drop(4, 5)    // 6
+  assert.ok(far < near / 2, `expected far(${far}) << near(${near})`)
+  // Strictly diminishing: each successive mile costs no more than the last.
+  for (let d = 2; d <= 9; d++) {
+    assert.ok(drop(d, d + 1) <= drop(d - 1, d) + 1e-9,
+      `mile ${d}→${d + 1} should not cost more than ${d - 1}→${d}`)
+  }
+})
+
+test('distanceSubScore: no distance → null (engine flags estimated)', () => {
+  assert.equal(distanceSubScore(null), null)
+  assert.equal(distanceSubScore(undefined), null)
+})
+
+test('distance: is absolute, not month-relative (closer scores higher on the fixed curve)', () => {
+  // Reference point = Pittsburgh downtown. NEAR ~0 mi, FAR ~5 mi away.
+  const ref = { lat: 40.4406, lng: -79.9959 }
+  const near = prop('NEAR', { enrich: { latitude: 40.4406, longitude: -79.9959 } })
+  const far = prop('FAR', { enrich: { latitude: 40.4406, longitude: -79.8050 } }) // ~10 mi east
+  const r = computeScores([near, far], { weights: onlyWeights('distance'), ctx: { refPoint: ref } })
+  assert.equal(r.get('NEAR').final, 100)
+  assert.ok(r.get('FAR').final < 30) // far rides down the flattened tail
+})
+
+test('distance: no reference point → neutral 50, flagged', () => {
+  const p = prop('A', { enrich: { latitude: 40.44, longitude: -79.99 } })
+  const r = computeScores([p], { weights: onlyWeights('distance') }) // no ctx.refPoint
+  const f = r.get('A').factors.find(x => x.key === 'distance')
   assert.equal(f.score, 50)
   assert.equal(f.estimated, true)
 })

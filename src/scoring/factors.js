@@ -11,6 +11,9 @@
  *                  'categorical' — getRaw returns the 0-100 score directly
  *                  'size'        — FIXED diminishing-returns curve vs. an ideal
  *                                  rental (NOT month-relative); see sizeSubScore
+ *                  'distance'    — FIXED diminishing-returns curve on miles from
+ *                                  the reference point (NOT month-relative); see
+ *                                  distanceSubScore
  *   direction  — for 'minmax' only: 'high' (bigger raw = higher score) or
  *                'low' (smaller raw = higher score)
  *   getRaw(prop, ctx) — pull the raw value from the canonical property. Returns
@@ -40,9 +43,8 @@ export const FACTORS = [
   {
     key: 'distance',
     label: 'Distance to your reference point',
-    hint: 'Closer to the ZIP or lat,long you enter scores higher.',
-    kind: 'minmax',
-    direction: 'low',
+    hint: 'Closer to the ZIP or lat,long you enter scores higher; the first ~2 miles matter most, then it flattens fast.',
+    kind: 'distance',
     getRaw: (p, ctx) => {
       const ref = ctx?.refPoint
       const lat = p.enrichmentSummary?.latitude
@@ -282,4 +284,45 @@ export function sizeSubScore(raw) {
     ratio(sqft, SIZE_TARGET.sqft)
   ) / 3
   return interpolateAnchors(sizeIndex, SIZE_ANCHORS)
+}
+
+// ── Distance: fixed diminishing-returns curve (NOT month-relative) ───────────
+//
+// Distance to YOUR reference point is an absolute quality of a property, so it
+// shouldn't be scaled against whatever else happens to be on the docket that
+// month (the old min-max behavior). It rides a fixed curve instead.
+//
+// Each additional mile costs less score than the one before — and the drop-off
+// accelerates after ~2 miles. The first two miles are steep (≈20 pts/mi), so the
+// 1→2 mi gap is large; past 2 miles the per-mile penalty shrinks quickly, so the
+// 4→5 mi gap is small. Anything beyond 25 miles bottoms out at 0.
+//
+//   mi:    0    1    2    3    4    5    7    10   15   25+
+//   score: 100  80   60   47   38   32   24   16   8    0
+//   Δ/mi:   20   20   13    9    6  …4   …2.7 …1.6  …0.8
+export const DISTANCE_ANCHORS = [
+  { x: 0, y: 100 },
+  { x: 1, y: 80 },
+  { x: 2, y: 60 },
+  { x: 3, y: 47 },
+  { x: 4, y: 38 },
+  { x: 5, y: 32 },
+  { x: 7, y: 24 },
+  { x: 10, y: 16 },
+  { x: 15, y: 8 },
+  { x: 25, y: 0 },
+]
+
+/**
+ * Distance sub-score (0-100) on the fixed curve above. `miles` is the
+ * great-circle distance to the reference point (haversineMiles). Returns null
+ * when distance is unavailable (no reference point or no coordinates) so the
+ * engine flags it "estimated" → neutral 50.
+ *
+ * @param {number|null} miles
+ * @returns {number|null}
+ */
+export function distanceSubScore(miles) {
+  if (!isNum(miles)) return null
+  return interpolateAnchors(Math.max(0, miles), DISTANCE_ANCHORS)
 }
