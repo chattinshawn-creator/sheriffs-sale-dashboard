@@ -62,6 +62,7 @@ const READINESS_OPTIONS = [
 const SORT_OPTIONS = [
   { key: 'sale-month',  label: 'Sale month (grouped)' },
   { key: 'score-desc',  label: 'Score (best first)' },
+  { key: 'score-asc',   label: 'Score (worst first)' },
   { key: 'spread-desc', label: 'Spread (best deals first)' },
   { key: 'bid-desc',    label: 'Opening bid (high → low)' },
   { key: 'bid-asc',     label: 'Opening bid (low → high)' },
@@ -614,6 +615,11 @@ function applySort(properties) {
       // to the bottom.
       sorted.sort((a, b) =>
         (scoreOf(b) ?? -Infinity) - (scoreOf(a) ?? -Infinity))
+      break
+    case 'score-asc':
+      // Worst score first. Unscored properties still sort to the bottom.
+      sorted.sort((a, b) =>
+        (scoreOf(a) ?? Infinity) - (scoreOf(b) ?? Infinity))
       break
     case 'spread-desc':
       // Best deals first. Properties with unknown spread sort to the bottom
