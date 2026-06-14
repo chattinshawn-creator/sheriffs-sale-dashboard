@@ -58,6 +58,28 @@ export function emptyProperty(caseNumber) {
       yearBuilt: null,       // WPRDC YEARBLT
       latitude: null,        // for the map view
       longitude: null,
+      // Valuation fields (added for the weighted 1–100 tool). null = unknown
+      // / neutral. See src/enrichment/bulk.js for how each is populated.
+      // Size (countywide, from the assessor record):
+      squareFeet: null,      // WPRDC FINISHEDLIVINGAREA
+      bedrooms: null,        // WPRDC BEDROOMS
+      bathrooms: null,       // FULLBATHS + 0.5×HALFBATHS (combined)
+      fullBaths: null,       // raw, kept so nothing is lost
+      halfBaths: null,       // raw
+      // Code violations / risk (Pittsburgh proper ONLY). Object when known
+      // ({ total, open, recent, headline, detail[] }); null when unavailable —
+      // codeViolationsNote says why (e.g. "outside City of Pittsburgh"). null
+      // is NOT the same as a real 0 (= a Pittsburgh parcel with no violations).
+      codeViolations: null,
+      codeViolationsNote: null,
+      // Opportunity Zone (countywide). bool when coords known; null + ozNote
+      // when not. ozTract = 11-digit census-tract GEOID when inside a zone.
+      inOpportunityZone: null,
+      ozTract: null,
+      ozNote: null,
+      // ZIP median household income (countywide), ACS B19013. null if the ZIP
+      // couldn't be parsed or isn't in the bundled table.
+      zipMedianIncome: null,
     },
 
     // Per-sale history (one entry per monthly upload)

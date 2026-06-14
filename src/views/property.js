@@ -1,5 +1,9 @@
-import { getProperty, updateUserFields } from '../storage/properties.js'
+import { getProperty, updateUserFields, listProperties } from '../storage/properties.js'
 import { getUpload, getUploadBlob } from '../storage/uploads.js'
+import { computeScores, buildValueMedians } from '../scoring/score.js'
+import { loadValuationState, activePreset } from '../scoring/presets.js'
+import { loadZipCentroids, resolveReferencePoint } from '../scoring/zipCentroids.js'
+import { valueSourceLabel } from '../scoring/factors.js'
 import { getAssessor } from '../enrichment/assessor.js'
 import { getViolations } from '../enrichment/violations.js'
 import { getPermits } from '../enrichment/permits.js'
@@ -36,7 +40,12 @@ export async function renderProperty(el, params) {
     prop.history.map(h => getUpload(h.uploadId).catch(() => null))
   )
 
-  el.innerHTML = renderShell(prop, current, uploadsByHistory)
+  // Compute this property's weighted score + factor breakdown. Scoring is
+  // relative to the property's own sale-month group, so we need the full set
+  // for the min-max ranges, plus the saved slider preset + reference point.
+  const score = await computePropertyScore(prop)
+
+  el.innerHTML = renderShell(prop, current, uploadsByHistory, score)
 
   wireUserFieldsAutoSave(el, prop)
   wireSourcePdfLinks(el)
@@ -47,7 +56,7 @@ export async function renderProperty(el, params) {
 
 // ─── Top-level shell ───────────────────────────────────────────────────────
 
-function renderShell(prop, current, uploadsByHistory) {
+function renderShell(prop, current, uploadsByHistory, score) {
   const flags = collectFlags(prop, current)
   const sold = current.soldFor != null
     ? `<span class="tag" style="background:#d1fae5;color:#065f46;border-color:#a7f3d0;">SOLD $${current.soldFor.toLocaleString()}</span>`
@@ -70,6 +79,7 @@ function renderShell(prop, current, uploadsByHistory) {
     </div>
 
     ${renderValidationBanner(prop)}
+    ${renderScoreCard(prop, score)}
     ${renderPhotoCard(prop)}
     ${renderUserFieldsCard(prop)}
     ${renderSaleInfoCard(prop, current)}
@@ -104,6 +114,149 @@ function collectFlags(prop, current) {
     out.push(`<span class="tag">${postponements} postponements</span>`)
   }
   return out
+}
+
+// ─── Weighted score breakdown ──────────────────────────────────────────────
+
+/**
+ * Compute this property's score using the active slider preset. Returns
+ * { result, presetName, refText } where result is the per-property object from
+ * computeScores (final + factors[]), or null when scoring can't run.
+ */
+async function computePropertyScore(prop) {
+  try {
+    const [allProps, valState] = await Promise.all([
+      listProperties(),
+      loadValuationState(),
+      loadZipCentroids().catch(() => null),
+    ])
+    const preset = activePreset(valState)
+    const ref = resolveReferencePoint(preset.refPoint)
+    const ctx = {
+      refPoint: ref ? { lat: ref.lat, lng: ref.lng } : null,
+      valueMedians: buildValueMedians(allProps),
+    }
+    const scores = computeScores(allProps, { weights: preset.weights, ctx })
+    return {
+      result: scores.get(prop.caseNumber) || null,
+      presetName: valState.activeName,
+      ctx,
+    }
+  } catch (e) {
+    console.warn('[property] scoring failed:', e)
+    return null
+  }
+}
+
+function renderScoreCard(prop, score) {
+  if (!score || !score.result) return ''
+  const { result, presetName, ctx } = score
+
+  if (result.final == null) {
+    return `
+      <div class="card">
+        <h3 style="margin-top:0;">Weighted score</h3>
+        <p class="muted small">
+          No factors are weighted in the “${escapeHtml(presetName)}” preset, so there's
+          no score. Turn on a slider in the score panel on the
+          <a href="#/">Home page</a> to start scoring.
+        </p>
+      </div>
+    `
+  }
+
+  const v = result.final
+  const ringColor = v >= 70 ? 'var(--color-ok)' : v >= 40 ? '#b45309' : 'var(--color-err)'
+
+  // Only factors that actually count (weight > 0) are shown in the breakdown,
+  // sorted by how much they contributed (sub-score × weight) so the reasons a
+  // property scored what it did read top-down.
+  const active = result.factors
+    .filter(f => f.weight > 0)
+    .sort((a, b) => (b.score * b.weight) - (a.score * a.weight))
+
+  const rows = active.map(f => {
+    const note = f.key === 'price' && !f.estimated
+      ? `<span class="muted small">${escapeHtml(valueSourceLabel(prop, ctx) || '')}</span>`
+      : f.estimated
+        ? `<span class="tag" style="background:#fef3c7;color:#b45309;border-color:#fde68a;" title="No data for this factor — scored a neutral 50 so it neither helps nor hurts.">estimated / no data</span>`
+        : `<span class="muted small">${escapeHtml(rawDetail(f) || '')}</span>`
+    return `
+      <tr>
+        <td style="padding:6px 8px;">${escapeHtml(f.label)}</td>
+        <td style="padding:6px 8px;text-align:right;font-weight:600;color:${f.score >= 70 ? 'var(--color-ok)' : f.score >= 40 ? '#b45309' : 'var(--color-err)'};">${f.score}</td>
+        <td style="padding:6px 8px;text-align:right;">${f.weightPct}%</td>
+        <td style="padding:6px 8px;">${note}</td>
+      </tr>
+    `
+  }).join('')
+
+  const estNote = result.anyEstimated
+    ? `<p class="muted small" style="margin:8px 0 0;">
+         Factors marked <em>estimated / no data</em> had no value for this property and were
+         scored a neutral 50 — they neither helped nor hurt. Run <strong>Enrich properties</strong>
+         on Home to fill missing data.
+       </p>`
+    : ''
+
+  return `
+    <div class="card" id="score-card">
+      <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <h3 style="margin:0;">Weighted score</h3>
+        <span class="muted small">Preset: <strong>${escapeHtml(presetName)}</strong></span>
+      </div>
+      <div class="row" style="gap:18px;align-items:center;margin:12px 0;flex-wrap:wrap;">
+        <div style="width:84px;height:84px;border-radius:50%;border:6px solid ${ringColor};
+                    display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+          <span style="font-size:30px;font-weight:800;">${v}</span>
+        </div>
+        <div class="muted small" style="flex:1;min-width:220px;">
+          1–100, where higher = a better fit for what you've prioritized this month.
+          Each factor below is scored against the other properties in the same sale month,
+          then blended by its weight.
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:14px;">
+          <thead>
+            <tr style="text-align:left;border-bottom:1px solid var(--color-border);">
+              <th style="padding:6px 8px;">Factor</th>
+              <th style="padding:6px 8px;text-align:right;">Sub-score</th>
+              <th style="padding:6px 8px;text-align:right;">Weight</th>
+              <th style="padding:6px 8px;">Detail</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${estNote}
+    </div>
+  `
+}
+
+/** Human-readable raw value for a factor row's "Detail" column. */
+function rawDetail(f) {
+  const r = f.raw
+  if (r == null) return ''
+  switch (f.key) {
+    case 'distance': return `${r.toFixed(1)} mi away`
+    case 'price': return `${r.toFixed(1)}× value-to-cost`
+    case 'risk': return `${r} open/recent violation${r === 1 ? '' : 's'}`
+    case 'postponement': return `${r} postponement${r === 1 ? '' : 's'}`
+    case 'lienType': return r >= 100 ? 'tax / other lien' : 'mortgage foreclosure'
+    case 'opportunityZone': return r ? 'inside an Opportunity Zone' : 'not in an Opportunity Zone'
+    case 'income': return `$${Math.round(r).toLocaleString()} ZIP median`
+    case 'size':
+      if (typeof r === 'object') {
+        const parts = []
+        if (r.sqft != null) parts.push(`${Math.round(r.sqft).toLocaleString()} sq ft`)
+        if (r.beds != null) parts.push(`${r.beds} bd`)
+        if (r.baths != null) parts.push(`${r.baths} ba`)
+        return parts.join(' · ')
+      }
+      return ''
+    default: return ''
+  }
 }
 
 // ─── Property image (aerial + photo links) ────────────────────────────────
