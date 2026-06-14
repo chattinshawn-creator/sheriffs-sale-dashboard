@@ -15,6 +15,25 @@ export function currentPath() {
 }
 
 /**
+ * Parse a `?a=1&b=two` query string into a plain object. Empty/missing
+ * string → {}. Keys and values are URI-decoded. Used so views can offer
+ * deep links like `#/search?month=2026-06` without changing route matching.
+ */
+function parseQuery(qs) {
+  const out = {}
+  if (!qs) return out
+  for (const pair of qs.split('&')) {
+    if (!pair) continue
+    const eq = pair.indexOf('=')
+    const k = eq === -1 ? pair : pair.slice(0, eq)
+    const v = eq === -1 ? '' : pair.slice(eq + 1)
+    try { out[decodeURIComponent(k)] = decodeURIComponent(v) }
+    catch { out[k] = v }
+  }
+  return out
+}
+
+/**
  * Match the current path against registered routes.
  * Exact matches win first. Otherwise, routes containing `:param` segments
  * are matched positionally — e.g. registering "/property/:caseNumber"
@@ -44,11 +63,14 @@ function matchRoute(path) {
 
 export function startRouter(mountEl) {
   async function renderCurrent() {
-    const path = currentPath()
+    const raw = currentPath()
+    const qIdx = raw.indexOf('?')
+    const path = qIdx === -1 ? raw : raw.slice(0, qIdx)
+    const query = qIdx === -1 ? {} : parseQuery(raw.slice(qIdx + 1))
     const match = matchRoute(path) || { render: routes.get('/'), params: {} }
     mountEl.innerHTML = ''
     try {
-      if (match.render) await match.render(mountEl, match.params)
+      if (match.render) await match.render(mountEl, { ...match.params, query })
     } catch (e) {
       // Surface render errors instead of leaving a blank page.
       console.error('[router] error rendering', path, e)
@@ -63,7 +85,8 @@ export function startRouter(mountEl) {
       `
     }
 
-    // Highlight the active nav link.
+    // Highlight the active nav link. Compare against the path only (ignoring
+    // any ?query) so a deep-linked view stays highlighted.
     document.querySelectorAll('nav.top-nav a').forEach(a => {
       const href = a.getAttribute('href')
       if (href === '#' + path) a.classList.add('active')

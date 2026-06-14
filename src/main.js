@@ -6,6 +6,8 @@ import { renderSettings } from './views/settings.js'
 import { renderProperty } from './views/property.js'
 import { renderMap } from './views/map.js'
 import { renderTrends } from './views/trends.js'
+import { renderArchive } from './views/archive.js'
+import { renderSearch } from './views/search.js'
 
 const app = document.getElementById('app')
 
@@ -23,6 +25,8 @@ registerRoute('/settings', renderSettings)
 registerRoute('/property/:caseNumber', renderProperty)
 registerRoute('/map', renderMap)
 registerRoute('/trends', renderTrends)
+registerRoute('/search', renderSearch)
+registerRoute('/archive', renderArchive)
 
 if (!window.location.hash) navigate('/')
 startRouter(mainEl)
