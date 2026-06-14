@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node src/pdf/outcome.test.js && node src/pdf/classify.test.js && node src/trends/aggregate.test.js && node src/storage/history-order.test.js"
+    "test": "node src/pdf/outcome.test.js && node src/pdf/classify.test.js && node src/trends/aggregate.test.js && node src/storage/history-order.test.js && node src/enrichment/enrichment-fields.test.js && node src/scoring/score.test.js"
   },
   "devDependencies": {
     "vite": "^5.4.0"

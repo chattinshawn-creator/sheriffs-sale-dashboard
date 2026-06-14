@@ -190,7 +190,7 @@ Neighborhood resolution, in order:
 2. **PLI violations / permits `neighborhood`** — Pittsburgh fallback when the centroid carries no neighborhood.
 3. **Ward-based fallback** — if neither gives a name, the Hilltop badge can still fire from the assessor's ward (parsed from MUNIDESC). Hilltop wards (Shawn-confirmed): 16, 17, 18, 29, 30, 32.
 
-The bulk enrich stores `latitude`, `longitude`, `neighborhood`, `ward`, `fairMarketValue`, and `yearBuilt` on each property's `enrichmentSummary`. Throttled at 200ms per uncached API call. Re-running is cheap: cached lookups skip the API.
+The bulk enrich stores `latitude`, `longitude`, `neighborhood`, `ward`, `fairMarketValue`, `yearBuilt`, and the valuation fields (`squareFeet`, `bedrooms`, `bathrooms`, `codeViolations`, `inOpportunityZone`/`ozTract`, `zipMedianIncome` — see below) on each property's `enrichmentSummary`. Throttled at 200ms per uncached API call. Re-running is cheap: cached lookups skip the API.
 
 (`src/enrichment/geocode.js` and `neighborhoods.js` remain in the tree from the earlier Census-geocoder approach but are no longer used by the bulk enrich.)
 
@@ -205,6 +205,26 @@ When you load Home, the file is fetched once and indexed in memory by `parcel_id
 - A **"Condemned only"** filter toggle in the filter bar for fast triage
 
 Coverage: Pittsburgh only (PLI's jurisdiction). Properties outside Pittsburgh are never in this list — they just don't get the badge, which is correct.
+
+### Valuation fields (for the weighted 1–100 tool)
+
+Bulk enrich also denormalizes four data points the (separate, later) valuation tool needs. Each is set to `null` with a short note when it can't be determined — never faked — so the valuation tool can treat a missing factor as neutral rather than guessing.
+
+| Field on `enrichmentSummary` | Factor | Coverage | Source |
+|---|---|---|---|
+| `squareFeet`, `bedrooms`, `bathrooms` (+ raw `fullBaths`/`halfBaths`) | Size | County-wide | Allegheny County Property Assessments — the **same record** already fetched for fair-market value, no extra call. `bathrooms` = full + 0.5×half. Blank for vacant/commercial → `null`. |
+| `codeViolations` (`{ total, open, recent, headline, detail[] }`) + `codeViolationsNote` | Risk | **Pittsburgh proper only** | WPRDC PLI/DOMI/ES Violations (live query, cached 30 days). Counts distinct **casefiles** (not raw inspection rows). `headline` = casefiles still open OR inspected within 3 years; `total` = all-time. Outside Pittsburgh → `null` + note (not `0`). |
+| `inOpportunityZone` (bool) + `ozTract` | Opportunity Zone | County-wide | Bundled QOZ tract polygons, point-in-polygon against the property's coordinates. |
+| `zipMedianIncome` | Median income | County-wide | Bundled ACS B19013 table, keyed by the ZIP parsed from the address. |
+
+### Bundled data vintages
+
+Two small static files are committed to the repo (like `condemned_dead_end.geojson`) so these factors need no runtime network call. Refresh them by re-running the build scripts; both stamp their source + vintage + pull date into the file header.
+
+- **`public/opportunity_zones.geojson`** (~314 KB, 68 tracts) — designated Qualified Opportunity Zones in Allegheny County (`GEOID10 LIKE '42003%'`), from the **HUD Opportunity Zones** layer (`services.arcgis.com/VTyQ9soqVukalItT/.../Opportunity_Zones/FeatureServer/13`). **Vintage: the 2018 designation round (OZ 1.0)**, which is still the legally current set — a new "OZ 2.0" nomination cycle opens **July 1, 2026** but designates no new tracts yet. Pulled **2026-06-13**. No rebuild script (one-off; re-pull from HUD if OZ 2.0 lands).
+- **`public/zip_median_income.json`** (~2 KB, 111 ZIPs) — median household income by ZIP for Allegheny County. **Table B19013, ACS 2024 5-year (2020–2024)**, pulled **2026-06-13** via the free, keyless **Census Reporter API** (the Census Bureau's own API now requires a per-user key; Census Reporter serves the identical ACS table). Rebuild: `node scripts/build-zip-income.mjs`.
+
+A CLI spot-check that runs all four fields against live WPRDC data + the bundled polygons for one Carrick parcel: `node scripts/spot-check-carrick.mjs`.
 
 ### What's NOT enriched (and why)
 
@@ -260,13 +280,22 @@ If you ever need to wipe everything: open browser devtools (F12) → **Applicati
 │   │   ├── wprdc.js              ← WPRDC CKAN API wrapper + dataset IDs
 │   │   ├── assessor.js           ← cache-aware assessor lookup (30-day TTL)
 │   │   ├── violations.js         ← PLI/DOMI/ES violations (Pittsburgh only)
+│   │   ├── violationsSummary.js  ← pure casefile-count/risk summarizer (testable)
 │   │   ├── permits.js            ← PLI permits (Pittsburgh only)
+│   │   ├── assessorFields.js     ← pure size-field extractor (sqft/beds/baths)
 │   │   ├── geocode.js            ← US Census Geocoder wrapper (address → lat/lng)
+│   │   ├── pointInPolygon.js     ← shared ray-casting PIP (neighborhoods + QOZ)
 │   │   ├── neighborhoods.js      ← point-in-polygon against neighborhoods.geojson
+│   │   ├── opportunityZone.js    ← QOZ lookup against bundled tract polygons
+│   │   ├── income.js             ← ZIP→ACS median-income lookup + ZIP parser
 │   │   ├── condemned.js          ← PLI condemned/dead-end property lookup
 │   │   ├── hilltop.js            ← Hilltop neighborhood list + matcher
 │   │   └── bulk.js               ← bulk enrich all Pittsburgh properties
 │   └── ui/                       ← shared bits (nav, formatters)
+├── scripts/                      ← dev-time Node scripts (not shipped)
+│   ├── build-zip-income.mjs      ← rebuilds public/zip_median_income.json
+│   └── spot-check-carrick.mjs    ← live end-to-end check of the 4 new fields
+├── public/                       ← bundled static data (geojson, zip income)
 ├── index.html
 ├── package.json
 ├── vite.config.js

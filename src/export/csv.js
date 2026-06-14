@@ -104,11 +104,23 @@ function condemnedField(p, field) {
  * RFC 4180-style quoting: any field containing a comma, quote, or newline
  * is wrapped in double quotes, and inner quotes are doubled.
  */
-export function propertiesToCsv(properties) {
-  const headers = COLUMNS.map(c => c[0])
+export function propertiesToCsv(properties, { scoreMap } = {}) {
+  // Optionally insert a "Score" column (the weighted 1-100 valuation) right
+  // after Address, when the caller supplies the computed score map. Other
+  // callers get the unchanged column set.
+  const columns = scoreMap
+    ? [
+        ...COLUMNS.slice(0, 2),
+        ['Score', p => scoreMap.get(p.caseNumber)?.final ?? ''],
+        ['Score has estimated factors?', p => scoreMap.get(p.caseNumber)?.anyEstimated ? 'yes' : ''],
+        ...COLUMNS.slice(2),
+      ]
+    : COLUMNS
+
+  const headers = columns.map(c => c[0])
   const rows = [headers]
   for (const p of properties) {
-    rows.push(COLUMNS.map(([, fn]) => {
+    rows.push(columns.map(([, fn]) => {
       try { return fn(p) } catch (e) { return null }
     }))
   }

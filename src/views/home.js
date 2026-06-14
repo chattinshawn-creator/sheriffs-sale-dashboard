@@ -4,11 +4,15 @@ import { validateProperty } from '../pdf/validation.js'
 import { statusBucketFor } from '../pdf/outcome.js'
 import { caseCategory, saleReadiness, isSoldProperty, CASE_CATEGORY_META, READINESS_META } from '../pdf/classify.js'
 import { isHilltopProperty, HILLTOP_LIST_LABEL } from '../enrichment/hilltop.js'
-import { enrichAllProperties, cancelBulkEnrichment } from '../enrichment/bulk.js'
+import { enrichAllProperties, cancelBulkEnrichment, ENRICH_VERSION } from '../enrichment/bulk.js'
 import { loadCondemnedIndex, getCondemnedInfoSync } from '../enrichment/condemned.js'
 import { normalizeParcelId } from '../enrichment/normalize.js'
 import { propertiesToCsv, downloadCsv, exportFilename } from '../export/csv.js'
 import { formatMonth, formatBytes, formatDate, escapeHtml, escapeAttr } from '../ui/format.js'
+import { computeScores, buildValueMedians } from '../scoring/score.js'
+import { loadValuationState, activePreset } from '../scoring/presets.js'
+import { loadZipCentroids, resolveReferencePoint } from '../scoring/zipCentroids.js'
+import { mountScorePanel } from '../scoring/panel.js'
 
 // In-memory filter/sort state. Survives navigation within the session but
 // resets on full page refresh — that's fine for V1; we can persist to URL
@@ -23,6 +27,16 @@ const state = {
   needsReviewOnly: false,
   hilltopOnly: false,
   condemnedOnly: false,
+}
+
+// Valuation scoring state, computed over ALL properties (independent of the
+// active filters, since each factor is normalized within its sale-month group).
+// renderPropertyCard reads `scoring.scores` to draw the per-card badge.
+const scoring = {
+  state: null,           // loaded preset state (presets.js)
+  valueMedians: null,    // { byNeighborhood, byMunicipality } for the price factor
+  ctx: {},               // { refPoint, valueMedians } passed into computeScores
+  scores: new Map(),     // caseNumber -> { final, factors, anyEstimated }
 }
 
 const STATUS_OPTIONS = [
@@ -47,6 +61,7 @@ const READINESS_OPTIONS = [
 ]
 const SORT_OPTIONS = [
   { key: 'sale-month',  label: 'Sale month (grouped)' },
+  { key: 'score-desc',  label: 'Score (best first)' },
   { key: 'spread-desc', label: 'Spread (best deals first)' },
   { key: 'bid-desc',    label: 'Opening bid (high → low)' },
   { key: 'bid-asc',     label: 'Opening bid (low → high)' },
@@ -66,7 +81,16 @@ export async function renderHome(el) {
       console.warn('[home] condemned index failed to load:', err)
       return null
     }),
+    // Scoring needs the bundled ZIP centroids (for the distance reference) and
+    // the saved slider presets. Both are tiny / cached and never block render.
+    loadZipCentroids().catch(() => null),
   ])
+
+  // Load preset weights, build the value-median lookups once, and compute the
+  // initial scores over ALL properties (filters don't affect normalization).
+  scoring.state = await loadValuationState()
+  scoring.valueMedians = buildValueMedians(properties)
+  recomputeScores(properties)
 
   if (uploads.length === 0) {
     el.innerHTML = `
@@ -83,6 +107,38 @@ export async function renderHome(el) {
   el.innerHTML = renderShell(uploads, properties)
   wireControls(el, properties)
   renderPropertyList(el, properties)
+}
+
+/**
+ * Recompute `scoring.scores` from the active preset + reference point over the
+ * full property set. Cheap (pure math, no I/O) so it's safe to call on every
+ * slider move.
+ */
+function recomputeScores(allProperties) {
+  const preset = activePreset(scoring.state)
+  const ref = resolveReferencePoint(preset.refPoint)
+  scoring.ctx = {
+    refPoint: ref ? { lat: ref.lat, lng: ref.lng } : null,
+    valueMedians: scoring.valueMedians,
+  }
+  scoring.scores = computeScores(allProperties, { weights: preset.weights, ctx: scoring.ctx })
+}
+
+/** Colored 1-100 score badge for a property card, or '' when scoring is off. */
+function scoreBadge(prop) {
+  const res = scoring.scores.get(prop.caseNumber)
+  if (!res || res.final == null) return ''
+  const v = res.final
+  const style = v >= 70
+    ? 'background:#d1fae5;color:#065f46;border-color:#a7f3d0;'
+    : v >= 40
+      ? 'background:#fef3c7;color:#b45309;border-color:#fde68a;'
+      : 'background:#fee2e2;color:#991b1b;border-color:#fecaca;'
+  const est = res.anyEstimated ? '*' : ''
+  const tip = res.anyEstimated
+    ? 'Weighted score (1–100). * = some factors had no data and were scored neutral.'
+    : 'Weighted score (1–100).'
+  return `<span class="tag" style="${style}font-weight:700;" title="${escapeAttr(tip)}">Score ${v}${est}</span>`
 }
 
 // ─── Top-level shell ───────────────────────────────────────────────────────
@@ -107,6 +163,8 @@ function renderShell(uploads, properties) {
 
     ${renderFilterBar()}
 
+    ${renderScorePanelShell()}
+
     ${renderBulkEnrichBar(properties)}
 
     <div class="row" style="margin:12px 0;justify-content:space-between;">
@@ -121,15 +179,35 @@ function renderShell(uploads, properties) {
   `
 }
 
+// ─── Score controls panel (collapsible; mounted after render) ──────────────
+
+function renderScorePanelShell() {
+  return `
+    <details class="card" id="score-panel" style="margin-bottom:4px;">
+      <summary style="cursor:pointer;font-weight:600;">
+        Property score — weighted 1–100
+        <span class="muted small" style="font-weight:normal;">(drag sliders to set what matters)</span>
+      </summary>
+      <div id="score-panel-body" style="margin-top:12px;"></div>
+    </details>
+  `
+}
+
 // ─── Bulk enrichment bar (only shown when there's work to do) ──────────────
 
 function isEnriched(p) {
-  // "Enriched" means we've attempted it AND have usable coordinates (so it
-  // can appear on the map). Pure-numeric neighborhood values are the old
-  // assessor-code bug and don't count.
+  // "Enriched" means we ran the CURRENT enrichment pipeline on it. We key off
+  // the schema version, NOT just attemptedAt, so properties enriched before a
+  // new field was added show up as needing a refresh. Properties enriched
+  // under an older version (attemptedAt set but enrichVersion missing/older)
+  // are treated as not-yet-enriched so the new fields get backfilled.
+  //
+  // We intentionally do NOT require coordinates here: some parcels (condos,
+  // odd lots) can never be geocoded, and the old coordinate check made those
+  // nag forever. The map's "N missing coordinates" note surfaces them instead.
   const s = p.enrichmentSummary || {}
-  if (!s.attemptedAt) return false
-  if (s.latitude == null || s.longitude == null) return false
+  if (s.enrichVersion !== ENRICH_VERSION) return false
+  // Pure-numeric neighborhood values are the old assessor-code bug — re-run.
   if (s.neighborhood && /^\d+$/.test(String(s.neighborhood).trim())) return false
   return true
 }
@@ -149,11 +227,13 @@ function renderBulkEnrichBar(properties) {
   const minutes = Math.max(1, Math.ceil((remaining * 0.4) / 60))
   return `
     <div class="card" id="bulk-enrich-card" style="margin-top:12px;background:#fff7ed;border-color:#fed7aa;">
-      <strong>Enrich properties for map coordinates, neighborhood + Hilltop tagging</strong>
+      <strong>Enrich properties for map, neighborhood, size, violations + valuation data</strong>
       <p class="small" style="margin:4px 0;">
-        ${remaining} of ${targets.length} properties haven't been enriched yet.
-        Fetches assessor data (fair-market value, year built) countywide, plus
-        neighborhood + condemnation data and map coordinates. Free, takes ~${minutes} minute${minutes === 1 ? '' : 's'}.
+        ${remaining} of ${targets.length} properties need enrichment (this now includes
+        new valuation fields, so previously-enriched properties are refreshed too).
+        Fetches assessor data (fair-market value, year built, sq ft, beds/baths) countywide,
+        code violations (Pittsburgh), Opportunity-Zone + ZIP-income tags, plus neighborhood,
+        condemnation and map coordinates. Free; cached lookups make it fast. ~${minutes} minute${minutes === 1 ? '' : 's'}.
       </p>
       <button class="primary" id="bulk-enrich-btn">Enrich ${remaining} properties</button>
     </div>
@@ -359,6 +439,16 @@ function wireControls(el, properties) {
     bulkBtn.addEventListener('click', () => runBulkEnrich(el, properties))
   }
 
+  // Mount the score controls. Any change (slider / reference point / preset)
+  // recomputes scores over all properties and re-renders the list instantly.
+  const panelBody = el.querySelector('#score-panel-body')
+  if (panelBody && scoring.state) {
+    mountScorePanel(panelBody, scoring.state, () => {
+      recomputeScores(properties)
+      renderPropertyList(el, properties)
+    })
+  }
+
   el.querySelectorAll('.chip').forEach(chipEl => {
     chipEl.addEventListener('click', () => {
       const group = chipEl.dataset.filterGroup
@@ -392,7 +482,7 @@ function wireControls(el, properties) {
   el.querySelector('#export-csv').addEventListener('click', (e) => {
     e.preventDefault()
     const sorted = applySort(applyFilters(properties))
-    const csv = propertiesToCsv(sorted)
+    const csv = propertiesToCsv(sorted, { scoreMap: scoring.scores })
     const summary = currentFilterSummary()
     downloadCsv(csv, exportFilename({ filterSummary: summary }))
   })
@@ -519,6 +609,12 @@ function lookupCondemned(prop) {
 function applySort(properties) {
   const sorted = [...properties]
   switch (state.sort) {
+    case 'score-desc':
+      // Best score first. Properties with no score (no weighted factors) sort
+      // to the bottom.
+      sorted.sort((a, b) =>
+        (scoreOf(b) ?? -Infinity) - (scoreOf(a) ?? -Infinity))
+      break
     case 'spread-desc':
       // Best deals first. Properties with unknown spread sort to the bottom
       // (use -Infinity so they're "smaller" than every known value).
@@ -592,6 +688,8 @@ function renderPropertyCard(prop, h) {
   const liveValidation = validateProperty(prop)
   const condemned = lookupCondemned(prop)
   const flagsHtml = []
+  const scoreHtml = scoreBadge(prop)
+  if (scoreHtml) flagsHtml.push(scoreHtml)
   if (condemned) {
     const tip = `Condemned/Dead End — ${condemned.inspectionStatus || '?'} • last inspection ${condemned.createDate || '?'}: ${condemned.latestInspectionResult || 'no result'}`
     flagsHtml.push(`<span class="tag" style="background:#991b1b;color:white;border-color:#7f1d1d;font-weight:600;" title="${escapeAttr(tip)}">CONDEMNED</span>`)
@@ -687,6 +785,11 @@ function getSpread(p) {
   const arv = p.userFields?.arvOverride ?? p.enrichmentSummary?.fairMarketValue ?? null
   if (bid == null || arv == null) return null
   return arv - bid
+}
+
+/** Final 1-100 score for sorting, or null when scoring is off / no factors. */
+function scoreOf(p) {
+  return scoring.scores.get(p.caseNumber)?.final ?? null
 }
 
 function isHumanReadableNeighborhood(name) {

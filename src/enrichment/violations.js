@@ -2,6 +2,10 @@ import { stores, get, set } from '../storage/db.js'
 import { normalizeParcelId } from './normalize.js'
 import { fetchAllByFilter, VIOLATIONS_RESOURCE_ID } from './wprdc.js'
 
+// Pure summarizer lives in its own (db-free) module so it can be unit-tested
+// in Node. Re-exported here so existing imports `from './violations.js'` work.
+export { summarizeViolations } from './violationsSummary.js'
+
 const TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
 /**
